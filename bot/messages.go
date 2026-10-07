@@ -1,0 +1,179 @@
+package bot
+
+import (
+	"cmp"
+	"fmt"
+	"html"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/ayndri/restok/restock"
+)
+
+const helpText = `👋 <b>Halo, aku Restok.</b>
+Aku nyatet barang pribadimu, belajar seberapa cepat kamu ngabisinnya, terus ngingetin sebelum habis.
+
+<b>Waktu beli</b>
+<code>beli sunscreen 89rb</code>
+<code>beli sabun cuci muka</code> (harga boleh nggak ditulis)
+
+<b>Waktu habis</b>
+<code>habis sunscreen</code>
+
+Makin sering kamu catat, makin pas perkiraannya. Kalau beli lagi padahal yang lama belum habis, yang baru disimpan sebagai cadangan.
+
+<b>Perintah</b>
+/stok — semua barang dan perkiraan habisnya
+/batal — batalkan catatan terakhir
+
+Tiap jam 8 pagi aku ngabarin barang yang hampir habis.`
+
+const parseHint = `Aku baru ngerti dua hal 🙂
+<code>beli sunscreen 89rb</code> waktu beli
+<code>habis sunscreen</code> waktu habis
+
+Ketik /bantuan buat lihat semuanya.`
+
+var monthNames = [...]string{"Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"}
+
+// shortDate memformat tanggal menjadi "11 Okt".
+func shortDate(t time.Time) string {
+	t = t.In(restock.WIB)
+	return fmt.Sprintf("%d %s", t.Day(), monthNames[t.Month()-1])
+}
+
+// relDay memformat jarak hari: "hari ini", "besok", "6 hari lagi", "lewat 3 hari".
+func relDay(due, today time.Time) string {
+	switch n := restock.DaysBetween(today, due); {
+	case n == 0:
+		return "hari ini"
+	case n == 1:
+		return "besok"
+	case n > 1:
+		return fmt.Sprintf("%d hari lagi", n)
+	default:
+		return fmt.Sprintf("lewat %d hari", -n)
+	}
+}
+
+func bold(name string) string {
+	return "<b>" + html.EscapeString(restock.Display(name)) + "</b>"
+}
+
+func formatBought(it restock.Item, price int64, spare bool) string {
+	var s strings.Builder
+	fmt.Fprintf(&s, "🛒 %s dicatat", bold(it.Name))
+	if price > 0 {
+		s.WriteString(" · " + restock.Rupiah(price))
+	}
+	if spare {
+		fmt.Fprintf(&s, "\n📦 Disimpan sebagai cadangan, yang lama masih dipakai. Total cadangan: %d.", it.Spares)
+	} else if due, ok := it.DueDate(); ok {
+		days, _ := it.Cycle()
+		fmt.Fprintf(&s, "\n⏳ Perkiraan habis <b>%s</b> (±%d hari)", shortDate(due), days)
+	}
+	return s.String()
+}
+
+func formatGuessSet(it restock.Item, days int) string {
+	if days == 0 {
+		return fmt.Sprintf("🛒 %s dicatat\n\nOke, nanti aku pelajari sendiri setelah barang ini habis sekali. Jangan lupa ketik <code>habis %s</code> ya.",
+			bold(it.Name), html.EscapeString(it.Name))
+	}
+	s := fmt.Sprintf("🛒 %s dicatat\n\nOke, aku anggap habis dalam ±%d hari.", bold(it.Name), days)
+	if due, ok := it.DueDate(); ok {
+		s += fmt.Sprintf(" Perkiraan habis <b>%s</b>.", shortDate(due))
+	}
+	return s + "\nSetelah habis beneran, perkiraannya aku sesuaikan sendiri."
+}
+
+func formatFinished(it restock.Item, res restock.FinishResult) string {
+	var s strings.Builder
+	fmt.Fprintf(&s, "✅ %s habis setelah <b>%d hari</b>.", bold(it.Name), res.Days)
+	if len(it.Cycles) >= 2 {
+		if days, ok := it.Cycle(); ok {
+			fmt.Fprintf(&s, "\nPerkiraan pemakaianmu sekarang ±%d hari.", days)
+		}
+	}
+
+	if res.OpenedSpare {
+		s.WriteString("\n\n📦 Cadangan mulai dipakai.")
+		if due, ok := it.DueDate(); ok {
+			fmt.Fprintf(&s, " Perkiraan habis <b>%s</b>.", shortDate(due))
+		}
+		if it.Spares > 0 {
+			fmt.Fprintf(&s, " Masih ada %d cadangan lagi.", it.Spares)
+		}
+	} else {
+		fmt.Fprintf(&s, "\n\n🛒 Nggak ada cadangan. Kalau udah beli lagi, ketik <code>beli %s</code>.", html.EscapeString(it.Name))
+	}
+	s.WriteString("\n\nSalah? /batal")
+	return s.String()
+}
+
+func formatReminder(it restock.Item, today time.Time) string {
+	due, _ := it.DueDate()
+	var when string
+	switch n := restock.DaysBetween(today, due); {
+	case n > 1:
+		when = fmt.Sprintf("kemungkinan habis sekitar <b>%d hari lagi</b> (%s)", n, shortDate(due))
+	case n == 1:
+		when = "kemungkinan habis <b>besok</b>"
+	case n == 0:
+		when = "kemungkinan habis <b>hari ini</b>"
+	default:
+		when = fmt.Sprintf("menurut perkiraan harusnya udah habis sejak <b>%s</b>", shortDate(due))
+	}
+	return fmt.Sprintf("🔔 %s %s.\n\nUdah beli lagi?", bold(it.Name), when)
+}
+
+// formatStock mengurutkan barang dari yang paling cepat habis. Barang tanpa
+// perkiraan menyusul, lalu barang yang sudah habis dan belum dibeli lagi.
+func formatStock(items []restock.Item, today time.Time) string {
+	if len(items) == 0 {
+		return "Belum ada barang. Coba kirim <code>beli sunscreen 89rb</code>."
+	}
+
+	type row struct {
+		it    restock.Item
+		due   time.Time
+		group int // 0 ada perkiraan, 1 dipakai tanpa perkiraan, 2 tidak dipakai
+	}
+	rows := make([]row, 0, len(items))
+	for _, it := range items {
+		r := row{it: it, group: 2}
+		if it.Active != nil {
+			r.group = 1
+			if due, ok := it.DueDate(); ok {
+				r.due, r.group = due, 0
+			}
+		}
+		rows = append(rows, r)
+	}
+	slices.SortStableFunc(rows, func(a, b row) int {
+		return cmp.Or(cmp.Compare(a.group, b.group), a.due.Compare(b.due))
+	})
+
+	var s strings.Builder
+	s.WriteString("<b>🧴 Stok kamu</b>\n")
+	for _, r := range rows {
+		fmt.Fprintf(&s, "\n• %s — ", bold(r.it.Name))
+		switch r.group {
+		case 0:
+			fmt.Fprintf(&s, "habis ±%s (%s)", shortDate(r.due), relDay(r.due, today))
+		case 1:
+			fmt.Fprintf(&s, "dipakai sejak %s, belum ada perkiraan", shortDate(r.it.Active.OpenedAt))
+		default:
+			if r.it.Spares > 0 {
+				s.WriteString("belum dibuka")
+			} else {
+				s.WriteString("habis, belum beli lagi")
+			}
+		}
+		if r.it.Spares > 0 {
+			fmt.Fprintf(&s, " · 📦 %d cadangan", r.it.Spares)
+		}
+	}
+	return s.String()
+}

@@ -1,0 +1,18 @@
+# rahasia
+.env
+.env.*
+!.env.example
+
+# vercel
+.vercel/
+
+# hasil build
+/restok
+*.exe
+
+# editor & tooling
+.vscode/
+.idea/
+CLAUDE.md
+AGENTS.md
+.claude/
