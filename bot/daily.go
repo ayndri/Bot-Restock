@@ -11,6 +11,7 @@ import (
 // RunDaily dipanggil cron tiap pagi. Setiap barang yang perkiraan habisnya
 // sudah dekat dan belum punya cadangan dapat satu pesan dengan tombol.
 // Unit yang kadaluwarsa dalam 14 hari dapat pesan terpisah, sekali saja.
+// Kegiatan rutin yang sudah waktunya juga diingatkan sekali.
 // Satu chat atau satu barang gagal tidak menghentikan yang lain.
 func (b *Bot) RunDaily(ctx context.Context) (int, error) {
 	chats, err := b.Store.Chats(ctx)
@@ -60,6 +61,26 @@ func (b *Bot) RunDaily(ctx context.Context) (int, error) {
 				if err != nil {
 					errs = append(errs, fmt.Errorf("chat %d, %s kadaluwarsa: %w", chatID, it.Name, err))
 				}
+			}
+		}
+
+		habits, err := b.Store.Habits(ctx, chatID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("chat %d kegiatan: %w", chatID, err))
+			continue
+		}
+		for _, h := range habits {
+			if !h.NeedsReminder(today) {
+				continue
+			}
+			last := h.Last()
+			err := b.Sender.SendMessage(ctx, chatID, formatHabitReminder(h, today), habitReminderKeyboard(last.ID))
+			if err == nil {
+				sent++
+				err = b.Store.MarkHabitReminded(ctx, last.ID, now)
+			}
+			if err != nil {
+				errs = append(errs, fmt.Errorf("chat %d, %s: %w", chatID, h.Name, err))
 			}
 		}
 	}

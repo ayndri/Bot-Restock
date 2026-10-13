@@ -30,6 +30,14 @@ type Store interface {
 	SetPending(ctx context.Context, chatID, unitID int64, at time.Time) error
 	TakePending(ctx context.Context, chatID int64) (unitID int64, since time.Time, ok bool, err error)
 	Chats(ctx context.Context) ([]int64, error)
+
+	Done(ctx context.Context, chatID, updateID int64, name string, at time.Time) (restock.DoneResult, error)
+	Habits(ctx context.Context, chatID int64) ([]restock.Habit, error)
+	Habit(ctx context.Context, chatID, habitID int64) (restock.Habit, bool, error)
+	HabitByLog(ctx context.Context, chatID, logID int64) (restock.Habit, bool, error)
+	SetHabitGuess(ctx context.Context, chatID, habitID int64, days int) (bool, error)
+	MarkHabitReminded(ctx context.Context, logID int64, at time.Time) error
+	SnoozeHabit(ctx context.Context, logID int64, until time.Time) error
 }
 
 type Sender interface {
@@ -58,6 +66,7 @@ func text(s string) Reply { return Reply{Text: s} }
 // Commands ditampilkan sebagai menu "/" di Telegram.
 var Commands = []telegram.BotCommand{
 	{Command: "stok", Description: "Semua barang dan perkiraan habisnya"},
+	{Command: "rutin", Description: "Kegiatan rutin dan kapan waktunya lagi"},
 	{Command: "batal", Description: "Batalkan catatan terakhir"},
 	{Command: "bantuan", Description: "Cara pakai"},
 }
@@ -118,6 +127,12 @@ func (b *Bot) respond(ctx context.Context, updateID, chatID int64, msg string) (
 			return Reply{}, err
 		}
 		return text(formatStock(items, startOfDay(b.now()))), nil
+	case "/rutin":
+		habits, err := b.Store.Habits(ctx, chatID)
+		if err != nil {
+			return Reply{}, err
+		}
+		return text(formatHabits(habits, startOfDay(b.now()))), nil
 	case "/batal":
 		return b.undo(ctx, chatID)
 	}
@@ -198,6 +213,8 @@ func (b *Bot) record(ctx context.Context, updateID, chatID int64, msg string) (R
 			return text("Tanggal kadaluwarsa buat barang apa? Tulis sekalian waktu beli, misalnya <code>beli sunscreen exp 8/2027</code>, atau tekan tombol 📅 di catatan belinya."), nil
 		}
 		return text(parseHint), nil
+	case errors.Is(err, restock.ErrNoName) && cmd.Action == restock.Done:
+		return text("Kegiatannya apa? Contoh: <code>udah potong rambut</code> atau <code>kemarin udah ganti sprei</code>."), nil
 	case errors.Is(err, restock.ErrNoName):
 		return text("Nama barangnya apa? Contoh: <code>beli sunscreen 89rb</code> atau <code>habis sunscreen</code>."), nil
 	case errors.Is(err, restock.ErrNameTooLong):
@@ -211,6 +228,9 @@ func (b *Bot) record(ctx context.Context, updateID, chatID int64, msg string) (R
 	}
 	if !expires.IsZero() {
 		return text("Tanggal kadaluwarsa dicatat waktu beli, misalnya <code>beli sunscreen exp 8/2027</code>."), nil
+	}
+	if cmd.Action == restock.Done {
+		return b.done(ctx, updateID, chatID, cmd.Name, at)
 	}
 
 	items, err := b.Store.Items(ctx, chatID)
@@ -318,8 +338,11 @@ func (b *Bot) undo(ctx context.Context, chatID int64) (Reply, error) {
 		return text("Belum ada catatan yang bisa dibatalkan."), nil
 	}
 	name := html.EscapeString(restock.Display(u.Name))
-	if u.Action == restock.Buy {
+	switch u.Action {
+	case restock.Buy:
 		return text(fmt.Sprintf("↩️ Dibatalkan: beli <b>%s</b>.", name)), nil
+	case restock.Done:
+		return text(fmt.Sprintf("↩️ Dibatalkan: catatan <b>%s</b>.", name)), nil
 	}
 	return text(fmt.Sprintf("↩️ Dibatalkan: <b>%s</b> habis. Barangnya dianggap masih dipakai.", name)), nil
 }

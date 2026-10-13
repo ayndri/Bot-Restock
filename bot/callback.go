@@ -23,9 +23,13 @@ import (
 //	rb:<unit>        pengingat → udah beli
 //	rm:<unit>        pengingat → masih ada (tunda)
 //	rh:<unit>        pengingat → udah habis
+//	hg:<kegiatan>:<hari> tebakan awal jarak kegiatan rutin
+//	hd:<catatan>     pengingat kegiatan → udah
+//	hn:<catatan>     pengingat kegiatan → nanti dulu
 //
 // Tombol pengingat memakai id unit, bukan id barang, supaya tombol lama
-// tidak berlaku untuk unit berikutnya.
+// tidak berlaku untuk unit berikutnya. Begitu juga kegiatan memakai id
+// catatan terakhirnya.
 
 var guessOptions = []struct {
 	label string
@@ -192,6 +196,8 @@ func (b *Bot) callback(ctx context.Context, updateID, chatID, messageID int64, d
 
 	case "rb", "rm", "rh":
 		return b.reminderAnswer(ctx, updateID, chatID, id, action, editKB)
+	case "hg", "hd", "hn":
+		return b.habitCallback(ctx, updateID, chatID, id, action, arg, edit)
 	}
 	return "", nil
 }

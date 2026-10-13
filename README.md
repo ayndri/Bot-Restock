@@ -2,7 +2,8 @@
 
 **Bot Telegram pencatat barang pribadi** (skincare, toiletries, kebutuhan rutin).
 Catat waktu beli dan waktu habis, bot belajar seberapa cepat kamu ngabisin tiap
-barang, lalu mengingatkan **sebelum** barangnya habis.
+barang, lalu mengingatkan **sebelum** barangnya habis. Kegiatan rutin seperti
+potong rambut atau ganti sprei dicatat dengan cara yang sama.
 
 Ditulis dengan **Go**, jalan sebagai fungsi serverless di **Vercel**, data di
 **Neon Postgres**. Kerangkanya sama dengan [Dompetku](https://github.com/ayndri/Bot-Dompet).
@@ -40,6 +41,13 @@ bot : 🔔 Sunscreen kemungkinan habis sekitar 5 hari lagi (11 Okt).
 - **Cadangan.** Beli lagi padahal yang lama belum habis → disimpan sebagai cadangan.
   Saat yang lama habis, cadangan otomatis mulai dipakai. Barang yang punya cadangan
   tidak diingatkan.
+- **Kegiatan rutin ("terakhir kali").** `udah potong rambut`, `kemarin udah ganti sprei`.
+  Polanya sama dengan barang: pertama kali bot bertanya biasanya berapa lama sekali
+  (1 minggu sampai 1 tahun), lalu jaraknya dipelajari dari catatanmu dengan median
+  yang sama. Pengingat dikirim **tepat di hari** perkiraannya, dengan tombol
+  *✅ Udah* dan *⏳ Nanti dulu* (tunda 7 hari). Dicatat dua kali di hari yang sama
+  dianggap sekali. `udah beli …` dan `udah habis …` tetap dibaca sebagai barang.
+  Lihat semuanya lewat **`/rutin`**.
 - **Pengingat pagi.** Satu Vercel Cron tiap 08.00 WIB, 5 hari sebelum perkiraan habis.
   Tombol *Masih ada* menunda 3 hari. Pengingat yang sama tidak dikirim tiap hari.
 - **`/stok`** urut dari yang paling cepat habis. **`/batal`** membatalkan aksi
@@ -51,7 +59,7 @@ bot : 🔔 Sunscreen kemungkinan habis sekitar 5 hari lagi (11 Okt).
 
 | Folder | Isi |
 |---|---|
-| `restock/` | Aturan inti tanpa I/O: membaca pesan, prediksi siklus, kapan mengingatkan. |
+| `restock/` | Aturan inti tanpa I/O: membaca pesan, prediksi siklus, kapan mengingatkan. Kegiatan rutin di `habit.go`. |
 | `bot/` | Logika percakapan dan tombol. Bergantung pada interface `Store` dan `Sender`, jadi bisa dites tanpa database dan tanpa Telegram. |
 | `store/` | Query Postgres dengan `pgx`. Skema di `store/schema.sql`. |
 | `telegram/` | Klien Bot API kecil, tanpa library pihak ketiga. |

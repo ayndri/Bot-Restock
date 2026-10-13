@@ -20,6 +20,14 @@ type fakeStore struct {
 	seen    map[int64]bool
 	nextID  int64
 	pending *fakePending
+	habits  []restock.Habit // hanya ID, Name, GuessDays yang dipakai
+	logs    []fakeLog
+}
+
+type fakeLog struct {
+	id, habitID      int64
+	done             time.Time
+	reminded, snooze time.Time
 }
 
 type fakePending struct {
@@ -40,6 +48,7 @@ type fakeUnit struct {
 type fakeAction struct {
 	kind           restock.Action
 	unitID, opened int64
+	logID          int64
 }
 
 func (f *fakeStore) id() int64 { f.nextID++; return f.nextID }
@@ -135,6 +144,15 @@ func (f *fakeStore) Undo(_ context.Context, _ int64) (restock.Undone, bool, erro
 	}
 	a := f.actions[len(f.actions)-1]
 	f.actions = f.actions[:len(f.actions)-1]
+	if a.kind == restock.Done {
+		i := slices.IndexFunc(f.logs, func(l fakeLog) bool { return l.id == a.logID })
+		h, _, _ := f.Habit(context.Background(), 0, f.logs[i].habitID)
+		f.logs = slices.Delete(f.logs, i, i+1)
+		if !slices.ContainsFunc(f.logs, func(l fakeLog) bool { return l.habitID == h.ID }) {
+			f.habits = slices.DeleteFunc(f.habits, func(x restock.Habit) bool { return x.ID == h.ID })
+		}
+		return restock.Undone{Action: restock.Done, Name: h.Name}, true, nil
+	}
 	u := f.units[f.unit(a.unitID)]
 	it, _, _ := f.Item(context.Background(), 0, u.itemID)
 	if a.kind == restock.Buy {
@@ -244,8 +262,90 @@ func (f *fakeStore) TakePending(context.Context, int64) (int64, time.Time, bool,
 	return p.unitID, p.since, true, nil
 }
 
+func (f *fakeStore) Done(_ context.Context, _, updateID int64, name string, at time.Time) (restock.DoneResult, error) {
+	if err := f.once(updateID); err != nil {
+		return restock.DoneResult{}, err
+	}
+	var res restock.DoneResult
+	i := slices.IndexFunc(f.habits, func(h restock.Habit) bool { return h.Name == name })
+	if i < 0 {
+		f.habits = append(f.habits, restock.Habit{ID: f.id(), Name: name})
+		i, res.NewHabit = len(f.habits)-1, true
+	}
+	res.HabitID = f.habits[i].ID
+	if slices.ContainsFunc(f.logs, func(l fakeLog) bool {
+		return l.habitID == res.HabitID && restock.StartOfDay(l.done).Equal(restock.StartOfDay(at))
+	}) {
+		res.SameDay = true
+		return res, nil
+	}
+	res.LogID = f.id()
+	f.logs = append(f.logs, fakeLog{id: res.LogID, habitID: res.HabitID, done: at})
+	f.actions = append(f.actions, fakeAction{kind: restock.Done, logID: res.LogID})
+	return res, nil
+}
+
+func (f *fakeStore) Habits(context.Context, int64) ([]restock.Habit, error) {
+	var out []restock.Habit
+	for _, base := range f.habits {
+		h := base
+		h.Logs = nil
+		for _, l := range f.logs {
+			if l.habitID == h.ID {
+				h.Logs = append(h.Logs, restock.HabitLog{ID: l.id, DoneAt: l.done, RemindedAt: l.reminded, SnoozeUntil: l.snooze})
+			}
+		}
+		slices.SortStableFunc(h.Logs, func(a, b restock.HabitLog) int { return a.DoneAt.Compare(b.DoneAt) })
+		out = append(out, h)
+	}
+	return out, nil
+}
+
+func (f *fakeStore) Habit(ctx context.Context, chatID, habitID int64) (restock.Habit, bool, error) {
+	habits, _ := f.Habits(ctx, chatID)
+	for _, h := range habits {
+		if h.ID == habitID {
+			return h, true, nil
+		}
+	}
+	return restock.Habit{}, false, nil
+}
+
+func (f *fakeStore) log(id int64) int {
+	return slices.IndexFunc(f.logs, func(l fakeLog) bool { return l.id == id })
+}
+
+func (f *fakeStore) HabitByLog(ctx context.Context, chatID, logID int64) (restock.Habit, bool, error) {
+	i := f.log(logID)
+	if i < 0 {
+		return restock.Habit{}, false, nil
+	}
+	return f.Habit(ctx, chatID, f.logs[i].habitID)
+}
+
+func (f *fakeStore) SetHabitGuess(_ context.Context, _, habitID int64, days int) (bool, error) {
+	for i := range f.habits {
+		if f.habits[i].ID == habitID {
+			f.habits[i].GuessDays = days
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeStore) MarkHabitReminded(_ context.Context, logID int64, at time.Time) error {
+	f.logs[f.log(logID)].reminded = at
+	return nil
+}
+
+func (f *fakeStore) SnoozeHabit(_ context.Context, logID int64, until time.Time) error {
+	i := f.log(logID)
+	f.logs[i].snooze, f.logs[i].reminded = until, time.Time{}
+	return nil
+}
+
 func (f *fakeStore) Chats(context.Context) ([]int64, error) {
-	if len(f.items) == 0 {
+	if len(f.items) == 0 && len(f.habits) == 0 {
 		return nil, nil
 	}
 	return []int64{chat}, nil
@@ -686,7 +786,9 @@ func TestStockOrder(t *testing.T) {
 func TestHints(t *testing.T) {
 	h := newHarness(t)
 	for msg, want := range map[string]string{
-		"halo":         "dua hal",
+		"halo":         "tiga hal",
+		"udah":         "Kegiatannya apa",
+		"/rutin":       "Belum ada kegiatan",
 		"beli 20rb":    "Nama barangnya apa",
 		"/stok":        "Belum ada barang",
 		"/batal":       "Belum ada catatan",
@@ -703,5 +805,76 @@ func TestPrivateBot(t *testing.T) {
 	mustContain(t, h.say("beli serum").text, fmt.Sprintf("<code>%d</code>", chat))
 	if len(h.store.items) != 0 {
 		t.Error("chat yang tidak diizinkan tetap tercatat")
+	}
+}
+
+func TestHabitLearnedAndReminded(t *testing.T) {
+	h := newHarness(t) // 1 Sep
+	r := h.say("udah potong rambut")
+	mustContain(t, r.text, "<b>Potong rambut</b> dicatat", "berapa lama sekali")
+	if !slices.Contains(buttons(r.kb), "hg:1:30") {
+		t.Fatalf("tombol tebakan tidak ada: %v", buttons(r.kb))
+	}
+	mustContain(t, h.press("hg:1:30"), "±30 hari", "1 Okt")
+
+	// Dicatat dua kali di hari yang sama tidak menambah catatan.
+	mustContain(t, h.say("sudah potong rambut").text, "udah kecatat hari ini")
+	if len(h.store.logs) != 1 {
+		t.Fatalf("catatan %d, mau 1", len(h.store.logs))
+	}
+
+	// Pengingat dikirim tepat di hari perkiraannya, sekali saja.
+	h.now = time.Date(2026, 9, 30, 8, 0, 0, 0, restock.WIB)
+	if n, err := h.bot.RunDaily(context.Background()); n != 0 || err != nil {
+		t.Fatalf("30 Sep: terkirim %d (err %v), mau 0", n, err)
+	}
+	h.days(1)
+	if n, _ := h.bot.RunDaily(context.Background()); n != 1 {
+		t.Fatalf("1 Okt: terkirim %d, mau 1", n)
+	}
+	r = h.sender.msgs[len(h.sender.msgs)-1]
+	mustContain(t, r.text, "Waktunya <b>Potong rambut</b> lagi", "Terakhir 1 Sep", "30 hari")
+	if got := buttons(r.kb); !slices.Equal(got, []string{"hd:2", "hn:2"}) {
+		t.Fatalf("tombol pengingat = %v", got)
+	}
+	h.days(1)
+	if n, _ := h.bot.RunDaily(context.Background()); n != 0 {
+		t.Errorf("pengingat dikirim ulang %d kali", n)
+	}
+
+	// "Nanti dulu" menunda seminggu.
+	mustContain(t, h.press("hn:2"), "7 hari lagi")
+	h.days(6)
+	if n, _ := h.bot.RunDaily(context.Background()); n != 0 {
+		t.Errorf("masih dalam masa tunda, tapi terkirim %d", n)
+	}
+	h.days(1) // 9 Okt
+	h.bot.RunDaily(context.Background())
+
+	// "Udah" mencatat hari ini dan memakai jarak sebenarnya (38 hari).
+	mustContain(t, h.press("hd:2"), "jaraknya <b>38 hari</b>", "±38 hari")
+	mustContain(t, h.press("hd:2"), "nggak berlaku")
+
+	mustContain(t, h.say("/rutin").text, "<b>Potong rambut</b>", "16 Nov", "terakhir 9 Okt")
+}
+
+func TestHabitBackdatedAndUndo(t *testing.T) {
+	h := newHarness(t) // Selasa 1 Sep
+	h.say("udah ganti sprei 18/8")
+	h.press("hg:1:0") // nggak tahu
+	mustContain(t, h.say("/rutin").text, "terakhir 18 Agu, belum ada perkiraan")
+
+	r := h.say("kemarin udah ganti sprei")
+	mustContain(t, r.text, "tanggal 31 Agu", "jaraknya <b>13 hari</b>", "±13 hari", "/batal")
+
+	mustContain(t, h.say("/batal").text, "Dibatalkan: catatan <b>Ganti sprei</b>")
+	mustContain(t, h.say("/batal").text, "Dibatalkan: catatan <b>Ganti sprei</b>")
+	mustContain(t, h.say("/rutin").text, "Belum ada kegiatan")
+
+	// "udah beli" dan "udah habis" tetap ke barang, bukan kegiatan.
+	mustContain(t, h.say("udah beli sunscreen").text, "<b>Sunscreen</b> dicatat")
+	mustContain(t, h.say("udah habis sunscreen").text, "<b>Sunscreen</b> habis")
+	if len(h.store.habits) != 0 {
+		t.Errorf("tercatat sebagai kegiatan: %+v", h.store.habits)
 	}
 }

@@ -103,7 +103,7 @@ func (s *Store) Buy(ctx context.Context, chatID, updateID int64, name string, pr
 			RETURNING id`, res.ItemID, price, at, opened, dateParam(expires)).Scan(&res.UnitID); err != nil {
 			return err
 		}
-		return logAction(ctx, tx, chatID, updateID, "buy", res.UnitID, 0)
+		return logAction(ctx, tx, chatID, updateID, "buy", res.UnitID, 0, 0)
 	})
 	return res, err
 }
@@ -144,7 +144,7 @@ func (s *Store) Finish(ctx context.Context, chatID, updateID, itemID int64, at t
 		case !errors.Is(err, pgx.ErrNoRows):
 			return err
 		}
-		return logAction(ctx, tx, chatID, updateID, "finish", u.id, spareID)
+		return logAction(ctx, tx, chatID, updateID, "finish", u.id, spareID, 0)
 	})
 	return res, err
 }
@@ -168,22 +168,26 @@ func activeUnit(ctx context.Context, tx pgx.Tx, itemID int64) (unitRef, bool, er
 
 // logAction mencatat aksi untuk /batal. Kalau update yang sama datang lagi
 // (Telegram mengirim ulang saat webhook lambat), hasilnya restock.ErrDuplicate
-// dan seluruh transaksi dibatalkan.
-func logAction(ctx context.Context, tx pgx.Tx, chatID, updateID int64, kind string, unitID, openedUnitID int64) error {
-	var opened *int64
-	if openedUnitID != 0 {
-		opened = &openedUnitID
-	}
+// dan seluruh transaksi dibatalkan. Aksi barang mengisi unitID, aksi kegiatan
+// mengisi logID; id 0 disimpan sebagai NULL.
+func logAction(ctx context.Context, tx pgx.Tx, chatID, updateID int64, kind string, unitID, openedUnitID, logID int64) error {
 	var id int64
 	err := tx.QueryRow(ctx, `
-		INSERT INTO actions (chat_id, update_id, kind, unit_id, opened_unit_id)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO actions (chat_id, update_id, kind, unit_id, opened_unit_id, log_id)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (chat_id, update_id) DO NOTHING
-		RETURNING id`, chatID, updateID, kind, unitID, opened).Scan(&id)
+		RETURNING id`, chatID, updateID, kind, nullID(unitID), nullID(openedUnitID), nullID(logID)).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return restock.ErrDuplicate
 	}
 	return err
+}
+
+func nullID(id int64) *int64 {
+	if id == 0 {
+		return nil
+	}
+	return &id
 }
 
 // Undo membatalkan aksi terakhir. ok=false kalau belum ada aksi.
@@ -191,17 +195,21 @@ func (s *Store) Undo(ctx context.Context, chatID int64) (restock.Undone, bool, e
 	var res restock.Undone
 	var ok bool
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		var actionID, unitID, itemID int64
-		var openedUnitID *int64
+		var actionID, ownerID int64
+		var unitID, openedUnitID, logID *int64
 		var kind string
+		// ownerID adalah id barang untuk aksi beli/habis, id kegiatan untuk "done".
 		err := tx.QueryRow(ctx, `
-			SELECT a.id, a.kind, a.unit_id, a.opened_unit_id, i.id, i.name
+			SELECT a.id, a.kind, a.unit_id, a.opened_unit_id, a.log_id,
+			       COALESCE(i.id, h.id), COALESCE(i.name, h.name)
 			FROM actions a
-			JOIN units u ON u.id = a.unit_id
-			JOIN items i ON i.id = u.item_id
+			LEFT JOIN units u ON u.id = a.unit_id
+			LEFT JOIN items i ON i.id = u.item_id
+			LEFT JOIN habit_logs l ON l.id = a.log_id
+			LEFT JOIN habits h ON h.id = l.habit_id
 			WHERE a.chat_id = $1
 			ORDER BY a.id DESC LIMIT 1
-			FOR UPDATE OF a`, chatID).Scan(&actionID, &kind, &unitID, &openedUnitID, &itemID, &res.Name)
+			FOR UPDATE OF a`, chatID).Scan(&actionID, &kind, &unitID, &openedUnitID, &logID, &ownerID, &res.Name)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -211,16 +219,26 @@ func (s *Store) Undo(ctx context.Context, chatID int64) (restock.Undone, bool, e
 		ok = true
 		res.Action = restock.Action(kind)
 
-		if res.Action == restock.Buy {
+		switch res.Action {
+		case restock.Buy:
 			// Menghapus unit ikut menghapus baris aksinya (ON DELETE CASCADE).
-			if _, err := tx.Exec(ctx, `DELETE FROM units WHERE id = $1`, unitID); err != nil {
+			if _, err := tx.Exec(ctx, `DELETE FROM units WHERE id = $1`, *unitID); err != nil {
 				return err
 			}
 			// Barang yang tidak punya unit sama sekali ikut dihapus, supaya
 			// salah ketik nama tidak tertinggal di /stok.
 			_, err := tx.Exec(ctx, `
 				DELETE FROM items WHERE id = $1
-				AND NOT EXISTS (SELECT 1 FROM units WHERE item_id = $1)`, itemID)
+				AND NOT EXISTS (SELECT 1 FROM units WHERE item_id = $1)`, ownerID)
+			return err
+		case restock.Done:
+			// Sama seperti beli: catatannya dihapus, kegiatan tanpa catatan ikut hilang.
+			if _, err := tx.Exec(ctx, `DELETE FROM habit_logs WHERE id = $1`, *logID); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `
+				DELETE FROM habits WHERE id = $1
+				AND NOT EXISTS (SELECT 1 FROM habit_logs WHERE habit_id = $1)`, ownerID)
 			return err
 		}
 
@@ -231,7 +249,7 @@ func (s *Store) Undo(ctx context.Context, chatID int64) (restock.Undone, bool, e
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx, `UPDATE units SET finished_at = NULL WHERE id = $1`, unitID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE units SET finished_at = NULL WHERE id = $1`, *unitID); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM actions WHERE id = $1`, actionID)
@@ -394,9 +412,9 @@ func (s *Store) TakePending(ctx context.Context, chatID int64) (unitID int64, si
 	return unitID, since, err == nil, err
 }
 
-// Chats mengembalikan semua chat yang punya barang.
+// Chats mengembalikan semua chat yang punya barang atau kegiatan.
 func (s *Store) Chats(ctx context.Context) ([]int64, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT chat_id FROM items`)
+	rows, err := s.pool.Query(ctx, `SELECT chat_id FROM items UNION SELECT chat_id FROM habits`)
 	if err != nil {
 		return nil, err
 	}

@@ -60,7 +60,9 @@ Siklus = `finished_at − opened_at` per unit. Skema lengkap di `store/schema.sq
 |---|---|
 | `items` | Jenis barang per chat: nama (dinormalisasi), `guess_days`, `remind_before` |
 | `units` | Satu barang fisik: harga, `bought_at`, `opened_at`, `finished_at`, `reminded_at`, `snooze_until` |
-| `actions` | Log `buy` / `finish` untuk `/batal`, sekaligus penolak kiriman ulang (`UNIQUE (chat_id, update_id)`) |
+| `actions` | Log `buy` / `finish` / `done` untuk `/batal`, sekaligus penolak kiriman ulang (`UNIQUE (chat_id, update_id)`) |
+| `habits` | Kegiatan rutin per chat: nama, `guess_days` |
+| `habit_logs` | Satu kali kegiatan dilakukan: `done_at`, `reminded_at`, `snooze_until` |
 
 Status unit diturunkan dari kolom, tidak disimpan terpisah:
 **cadangan** (`opened_at` NULL) → **dipakai** → **habis** (`finished_at` terisi).
@@ -98,6 +100,8 @@ Pure function di paket tanpa I/O (`restock/`), wajib dites.
 | `habis sunscreen` | Tutup unit yang sedang dipakai. Cocok sebagian juga bisa (`habis cuci muka`). |
 | `/stok` | Semua barang: perkiraan habis, cadangan, yang sudah habis. |
 | `/batal` | Batalkan aksi terakhir. |
+| `udah potong rambut` | Catat kegiatan rutin hari ini. Tanggal mundur juga bisa. |
+| `/rutin` | Semua kegiatan rutin dan kapan waktunya lagi. |
 | `beli 2 sabun muka 45rb` | *(v1)* 2 unit; harga dianggap total → per unit 22.500. |
 | `buka serum` | *(v1)* Mulai pakai cadangan (penting untuk barang yang punya masa basi). |
 | `serum tahan 6 bulan` | *(v1)* Atur masa pakai setelah dibuka. |
@@ -128,6 +132,7 @@ Kalau `habis …` cocok ke beberapa barang (`habis sabun`), bot menampilkan tomb
 - [ ] Pakai sendiri seminggu, catat apa yang janggal
 
 ### 🟡 v1 (bot utuh)
+- [x] Kegiatan rutin ("terakhir kali"): `udah <kegiatan>`, tebakan awal lewat tombol, jarak dipelajari dengan `Predict` yang sama, pengingat di hari perkiraan, `/rutin`, ikut `/batal`
 - [ ] Jumlah unit (`beli 2 …`)
 - [x] Tanggal kadaluwarsa per unit (opsional): `exp 8/2027` atau tombol, pengingat 14 hari sebelumnya, cadangan dibuka berdasarkan kadaluwarsa terdekat
 - [ ] Masa basi setelah dibuka: `buka`, `tahan N bulan`, pengingat "mau basi"

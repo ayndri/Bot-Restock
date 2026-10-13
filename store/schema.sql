@@ -56,3 +56,34 @@ CREATE TABLE IF NOT EXISTS pending_expiry (
     unit_id    BIGINT      NOT NULL REFERENCES units (id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Kegiatan rutin ("terakhir kali"): potong rambut, ganti sprei, servis AC.
+CREATE TABLE IF NOT EXISTS habits (
+    id         BIGSERIAL PRIMARY KEY,
+    chat_id    BIGINT      NOT NULL,
+    name       TEXT        NOT NULL, -- sudah dinormalisasi, huruf kecil
+    guess_days INT         CHECK (guess_days > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (chat_id, name)
+);
+
+-- Satu baris = satu kali kegiatan dilakukan. Status pengingat ada di catatan
+-- terakhir, sama seperti unit, supaya /batal ikut mengembalikannya.
+CREATE TABLE IF NOT EXISTS habit_logs (
+    id           BIGSERIAL PRIMARY KEY,
+    habit_id     BIGINT      NOT NULL REFERENCES habits (id) ON DELETE CASCADE,
+    done_at      TIMESTAMPTZ NOT NULL,
+    reminded_at  TIMESTAMPTZ,
+    snooze_until TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS habit_logs_habit_idx ON habit_logs (habit_id, done_at);
+
+-- Aksi "done" menunjuk ke catatan kegiatan, bukan unit. Constraint dibuang lalu
+-- dibuat ulang supaya database lama dan baru berakhir dengan aturan yang sama.
+ALTER TABLE actions ADD COLUMN IF NOT EXISTS log_id BIGINT REFERENCES habit_logs (id) ON DELETE CASCADE;
+ALTER TABLE actions ALTER COLUMN unit_id DROP NOT NULL;
+ALTER TABLE actions DROP CONSTRAINT IF EXISTS actions_kind_check;
+ALTER TABLE actions ADD CONSTRAINT actions_kind_check CHECK (kind IN ('buy', 'finish', 'done'));
+ALTER TABLE actions DROP CONSTRAINT IF EXISTS actions_target_check;
+ALTER TABLE actions ADD CONSTRAINT actions_target_check CHECK ((unit_id IS NULL) <> (log_id IS NULL));

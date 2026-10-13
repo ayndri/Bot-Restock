@@ -27,6 +27,11 @@ func TestParse(t *testing.T) {
 		{"habis serum 20ml", Command{Finish, "serum 20ml", 0}, nil},
 		{"beli 89rb", Command{Buy, "", 89_000}, ErrNoName},
 		{"habis", Command{Finish, "", 0}, ErrNoName},
+		{"udah potong rambut", Command{Done, "potong rambut", 0}, nil},
+		{"Sudah Ganti Sprei", Command{Done, "ganti sprei", 0}, nil},
+		{"udah beli sunscreen 89rb", Command{Buy, "sunscreen", 89_000}, nil},
+		{"udah habis sunscreen", Command{Finish, "sunscreen", 0}, nil},
+		{"udah", Command{Done, "", 0}, ErrNoName},
 		{"kopi 25rb", Command{}, ErrUnknown},
 		{"", Command{}, ErrUnknown},
 	}
@@ -150,5 +155,44 @@ func TestMatch(t *testing.T) {
 				t.Errorf("Match(%q) = %v, mau %v", tt.query, got, tt.want)
 			}
 		}
+	}
+}
+
+func TestHabitDue(t *testing.T) {
+	logs := func(days ...int) []HabitLog {
+		var out []HabitLog
+		for i, d := range days {
+			out = append(out, HabitLog{ID: int64(i + 1), DoneAt: day(2026, 9, 1, 10).AddDate(0, 0, d)})
+		}
+		return out
+	}
+	tests := []struct {
+		name  string
+		h     Habit
+		today time.Time
+		want  bool
+	}{
+		{"tebakan, belum waktunya", Habit{GuessDays: 30, Logs: logs(0)}, day(2026, 9, 30, 0), false},
+		{"tebakan, tepat waktunya", Habit{GuessDays: 30, Logs: logs(0)}, day(2026, 10, 1, 0), true},
+		{"tanpa tebakan dan riwayat", Habit{Logs: logs(0)}, day(2027, 1, 1, 0), false},
+		// Jarak 28 dan 32 hari → median 30, dihitung dari catatan terakhir (31 Okt).
+		{"dari riwayat", Habit{GuessDays: 7, Logs: logs(0, 28, 60)}, day(2026, 11, 29, 0), false},
+		{"dari riwayat, waktunya", Habit{GuessDays: 7, Logs: logs(0, 28, 60)}, day(2026, 11, 30, 0), true},
+	}
+	for _, tt := range tests {
+		if got := tt.h.NeedsReminder(tt.today); got != tt.want {
+			due, _ := tt.h.DueDate()
+			t.Errorf("%s: NeedsReminder = %v, mau %v (perkiraan %v)", tt.name, got, tt.want, due)
+		}
+	}
+
+	h := Habit{GuessDays: 30, Logs: logs(0)}
+	h.Logs[0].RemindedAt = day(2026, 10, 1, 8)
+	if h.NeedsReminder(day(2026, 10, 5, 0)) {
+		t.Error("pengingat dikirim ulang")
+	}
+	h.Logs[0] = HabitLog{DoneAt: h.Logs[0].DoneAt, SnoozeUntil: day(2026, 10, 8, 0)}
+	if h.NeedsReminder(day(2026, 10, 7, 0)) || !h.NeedsReminder(day(2026, 10, 8, 0)) {
+		t.Error("masa tunda tidak dihormati")
 	}
 }

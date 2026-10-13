@@ -28,7 +28,7 @@ func openTest(t *testing.T) *Store {
 	if err := st.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.pool.Exec(ctx, `TRUNCATE actions, units, items RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := st.pool.Exec(ctx, `TRUNCATE actions, units, items, habit_logs, habits RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	return st
@@ -165,6 +165,78 @@ func TestStoreFlow(t *testing.T) {
 
 	chats, err := st.Chats(ctx)
 	if err != nil || len(chats) != 1 || chats[0] != chat {
+		t.Fatalf("Chats: %v, %v", chats, err)
+	}
+}
+
+func TestStoreHabits(t *testing.T) {
+	st := openTest(t)
+	ctx := context.Background()
+	const chat = 42
+	day := func(m, d int) time.Time { return time.Date(2026, time.Month(m), d, 9, 0, 0, 0, restock.WIB) }
+
+	res, err := st.Done(ctx, chat, 1, "potong rambut", day(8, 1))
+	if err != nil || !res.NewHabit || res.SameDay || res.LogID == 0 {
+		t.Fatalf("catatan pertama: %+v, %v", res, err)
+	}
+	if _, err := st.Done(ctx, chat, 1, "potong rambut", day(8, 1)); !errors.Is(err, restock.ErrDuplicate) {
+		t.Fatalf("update dobel: err = %v, mau ErrDuplicate", err)
+	}
+	// Jam 23.30 WIB masih tanggal yang sama.
+	late := time.Date(2026, 8, 1, 23, 30, 0, 0, restock.WIB)
+	if res, err := st.Done(ctx, chat, 2, "potong rambut", late); err != nil || !res.SameDay {
+		t.Fatalf("hari yang sama: %+v, %v", res, err)
+	}
+	second, err := st.Done(ctx, chat, 3, "potong rambut", day(9, 2))
+	if err != nil || second.NewHabit || second.SameDay {
+		t.Fatalf("catatan kedua: %+v, %v", second, err)
+	}
+	if ok, err := st.SetHabitGuess(ctx, chat, res.HabitID, 30); !ok || err != nil {
+		t.Fatalf("SetHabitGuess: %v, %v", ok, err)
+	}
+	if ok, _ := st.SetHabitGuess(ctx, chat+1, res.HabitID, 30); ok {
+		t.Fatal("chat lain bisa mengubah kegiatan ini")
+	}
+
+	if err := st.MarkHabitReminded(ctx, second.LogID, day(10, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SnoozeHabit(ctx, second.LogID, day(10, 10)); err != nil {
+		t.Fatal(err)
+	}
+	h, ok, err := st.HabitByLog(ctx, chat, second.LogID)
+	if err != nil || !ok || h.GuessDays != 30 || len(h.Logs) != 2 || h.Last().ID != second.LogID {
+		t.Fatalf("HabitByLog: %+v, %v, %v", h, ok, err)
+	}
+	if !h.Last().RemindedAt.IsZero() || !h.Last().SnoozeUntil.Equal(day(10, 10)) {
+		t.Fatalf("tunda: %+v", h.Last())
+	}
+	if iv := h.Intervals(); len(iv) != 1 || iv[0] != 32 {
+		t.Fatalf("jarak %v, mau [32]", iv)
+	}
+	if _, ok, _ := st.HabitByLog(ctx, chat+1, second.LogID); ok {
+		t.Fatal("chat lain bisa melihat catatan ini")
+	}
+
+	// /batal untuk kegiatan bercampur dengan aksi barang.
+	if _, err := st.Buy(ctx, chat, 4, "serum", 0, day(9, 3), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if u, ok, err := st.Undo(ctx, chat); err != nil || !ok || u.Action != restock.Buy {
+		t.Fatalf("Undo beli: %+v, %v, %v", u, ok, err)
+	}
+	for range 2 {
+		if u, ok, err := st.Undo(ctx, chat); err != nil || !ok || u.Action != restock.Done || u.Name != "potong rambut" {
+			t.Fatalf("Undo kegiatan: %+v, %v, %v", u, ok, err)
+		}
+	}
+	if habits, _ := st.Habits(ctx, chat); len(habits) != 0 {
+		t.Fatalf("kegiatan masih ada: %+v", habits)
+	}
+
+	st.Done(ctx, chat+1, 5, "ganti sprei", day(9, 1))
+	chats, err := st.Chats(ctx)
+	if err != nil || len(chats) != 1 || chats[0] != chat+1 {
 		t.Fatalf("Chats: %v, %v", chats, err)
 	}
 }

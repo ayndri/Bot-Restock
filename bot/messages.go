@@ -26,6 +26,11 @@ Aku nyatet barang pribadimu, belajar seberapa cepat kamu ngabisinnya, terus ngin
 <code>habis serum senin</code>
 <code>5/10 beli shampo</code> (tanggal/bulan)
 
+<b>Kegiatan rutin</b>
+<code>udah potong rambut</code>
+<code>kemarin udah ganti sprei</code>
+Aku pelajari jaraknya, terus ngingetin waktu udah waktunya lagi.
+
 <b>Kadaluwarsa</b> (boleh nggak diisi)
 <code>beli sunscreen 89rb exp 8/2027</code>
 atau tekan tombol 📅 di bawah catatan beli. Aku ingetin 14 hari sebelumnya.
@@ -34,13 +39,15 @@ Makin sering kamu catat, makin pas perkiraannya. Kalau beli lagi padahal yang la
 
 <b>Perintah</b>
 /stok — semua barang dan perkiraan habisnya
+/rutin — kegiatan rutin dan kapan waktunya lagi
 /batal — batalkan catatan terakhir
 
-Tiap jam 8 pagi aku ngabarin barang yang hampir habis.`
+Tiap jam 8 pagi aku ngabarin barang yang hampir habis dan kegiatan yang udah waktunya.`
 
-const parseHint = `Aku baru ngerti dua hal 🙂
+const parseHint = `Aku baru ngerti tiga hal 🙂
 <code>beli sunscreen 89rb</code> waktu beli
 <code>habis sunscreen</code> waktu habis
+<code>udah potong rambut</code> buat kegiatan rutin
 
 Ketik /bantuan buat lihat semuanya.`
 

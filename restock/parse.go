@@ -13,12 +13,14 @@ type Action string
 const (
 	Buy    Action = "buy"
 	Finish Action = "finish"
+	// Done mencatat kegiatan rutin: "udah potong rambut".
+	Done Action = "done"
 )
 
 // Command adalah hasil membaca satu pesan, misalnya "beli sunscreen 89rb".
 type Command struct {
 	Action Action
-	Name   string // sudah dinormalisasi
+	Name   string // nama barang atau kegiatan, sudah dinormalisasi
 	Price  int64  // 0 = tidak disebut
 }
 
@@ -26,7 +28,7 @@ type Command struct {
 const MaxNameLen = 60
 
 var (
-	ErrUnknown     = errors.New("bukan perintah beli/habis")
+	ErrUnknown     = errors.New("bukan perintah beli/habis/udah")
 	ErrNoName      = errors.New("nama barangnya kosong")
 	ErrNameTooLong = errors.New("nama barangnya kepanjangan")
 )
@@ -35,12 +37,18 @@ var verbs = map[string]Action{
 	"beli":  Buy,
 	"habis": Finish,
 	"abis":  Finish,
+	"udah":  Done,
+	"sudah": Done,
+	"udh":   Done,
+	"sdh":   Done,
+	"dah":   Done,
 }
 
-// Parse membaca "beli <nama> [harga]" atau "habis <nama>".
+// Parse membaca "beli <nama> [harga]", "habis <nama>", atau "udah <kegiatan>".
 //
 // Harga boleh di mana saja: "beli 89rb sunscreen" juga bisa. Angka polos di
 // bawah seribu dianggap bagian dari nama ("sunscreen spf 50"), bukan harga.
+// "udah beli ..." dan "udah habis ..." tetap dibaca sebagai beli dan habis.
 func Parse(text string) (Command, error) {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
@@ -51,6 +59,11 @@ func Parse(text string) (Command, error) {
 		return Command{}, ErrUnknown
 	}
 	fields = fields[1:]
+	if action == Done && len(fields) > 0 {
+		if next, ok := verbs[strings.ToLower(fields[0])]; ok && next != Done {
+			action, fields = next, fields[1:]
+		}
+	}
 
 	cmd := Command{Action: action}
 	if action == Buy {
