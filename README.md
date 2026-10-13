@@ -24,6 +24,10 @@ bot : 🔔 Sunscreen kemungkinan habis sekitar 5 hari lagi (11 Okt).
 - **Dua kata kerja saja.** `beli sunscreen 89rb` dan `habis sunscreen`. Harga boleh
   ditulis di mana saja dan paham `89rb`, `1,5jt`, `Rp45.000`. Angka polos di bawah
   seribu dianggap bagian dari nama (`sunscreen spf 50`).
+- **Catat yang kelupaan.** Tambahkan tanggal di depan atau di belakang:
+  `kemarin beli sunscreen 89rb`, `habis serum senin`, `5/10 beli shampo`.
+  Tanggal habis yang lebih awal dari tanggal mulai dipakai ditolak, supaya
+  siklusnya tidak rusak.
 - **Siklus dipelajari sendiri.** Lama pemakaian tiap unit dicatat. Perkiraan berikutnya
   memakai median dari siklus terbaru. Siklus yang janggal (lebih dari 2× atau kurang
   dari separuh median, biasanya karena lupa lapor) dibuang supaya perkiraan tidak rusak.

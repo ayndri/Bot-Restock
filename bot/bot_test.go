@@ -376,6 +376,49 @@ func TestFinishAmbiguousAsks(t *testing.T) {
 	mustContain(t, h.press("f:3"), "<b>Sabun mandi</b> habis")
 }
 
+func TestBackdated(t *testing.T) {
+	h := newHarness(t) // Selasa 1 Sep 09.00
+	r := h.say("beli sunscreen 89rb 25/8")
+	mustContain(t, r.text, "<b>Sunscreen</b> dicatat", "Rp89.000", "tanggal 25 Agu")
+	if got := h.store.units[0].opened; !got.Equal(time.Date(2026, 8, 25, 9, 0, 0, 0, restock.WIB)) {
+		t.Fatalf("mulai dipakai %v, mau 25 Agu 09.00", got)
+	}
+
+	// Lupa lapor habis juga bisa: 25 Agu → 31 Agu = 6 hari.
+	mustContain(t, h.say("kemarin habis sunscreen").text, "habis setelah <b>6 hari</b>", "tanggal 31 Agu")
+
+	// Catatan hari ini tidak diberi baris tanggal.
+	if r := h.say("beli sunscreen"); strings.Contains(r.text, "📅") {
+		t.Errorf("catatan hari ini diberi tanggal:\n%s", r.text)
+	}
+}
+
+func TestBackdatedRejected(t *testing.T) {
+	h := newHarness(t)
+	mustContain(t, h.say("beli serum 5/9").text, "belum lewat")
+	if len(h.store.units) != 0 {
+		t.Fatal("tanggal masa depan tetap tercatat")
+	}
+
+	h.say("beli serum")
+	mustContain(t, h.say("kemarin habis serum").text, "baru mulai dipakai tanggal 1 Sep")
+	if it, _, _ := h.store.Item(context.Background(), chat, 1); it.Active == nil {
+		t.Error("serum tercatat habis padahal tanggalnya sebelum dibuka")
+	}
+}
+
+func TestFinishAmbiguousKeepsDate(t *testing.T) {
+	h := newHarness(t)
+	h.say("beli sabun cuci muka")
+	h.say("kemarin lusa beli sabun mandi") // 30 Agu
+	h.days(5)                              // Minggu 6 Sep
+	r := h.say("habis sabun kemarin")
+	if got := buttons(r.kb); !slices.Equal(got, []string{"f:1:20260905", "f:3:20260905"}) {
+		t.Fatalf("tombol pilihan = %v", got)
+	}
+	mustContain(t, h.press("f:3:20260905"), "<b>Sabun mandi</b> habis setelah <b>6 hari</b>", "tanggal 5 Sep")
+}
+
 func TestFinishUnknownItem(t *testing.T) {
 	h := newHarness(t)
 	mustContain(t, h.say("habis serum").text, "Belum ada <b>Serum</b>", "beli serum")

@@ -124,7 +124,13 @@ func command(word string) string {
 }
 
 func (b *Bot) record(ctx context.Context, updateID, chatID int64, msg string) (Reply, error) {
-	cmd, err := restock.Parse(msg)
+	day, rest, err := restock.SplitDate(msg, startOfDay(b.now()))
+	if errors.Is(err, restock.ErrFutureDate) {
+		return text("Tanggalnya belum lewat 🙂 Buat catatan yang kelupaan, tulis tanggal yang udah lewat, misalnya <code>kemarin beli sunscreen</code>."), nil
+	}
+	at := b.at(day)
+
+	cmd, err := restock.Parse(rest)
 	switch {
 	case errors.Is(err, restock.ErrUnknown):
 		return text(parseHint), nil
@@ -137,7 +143,7 @@ func (b *Bot) record(ctx context.Context, updateID, chatID int64, msg string) (R
 	}
 
 	if cmd.Action == restock.Buy {
-		return b.buy(ctx, updateID, chatID, cmd)
+		return b.buy(ctx, updateID, chatID, cmd, at)
 	}
 
 	items, err := b.Store.Items(ctx, chatID)
@@ -150,15 +156,32 @@ func (b *Bot) record(ctx context.Context, updateID, chatID int64, msg string) (R
 		return text(fmt.Sprintf("Belum ada <b>%s</b> di catatan.\nCatat dulu waktu beli: <code>beli %s</code>",
 			html.EscapeString(restock.Display(cmd.Name)), html.EscapeString(cmd.Name))), nil
 	case 1:
-		s, err := b.finish(ctx, updateID, chatID, matches[0])
+		s, err := b.finish(ctx, updateID, chatID, matches[0], at)
 		return text(s), err
 	}
-	return Reply{Text: "Maksud kamu yang mana?", Keyboard: pickItemKeyboard(matches)}, nil
+	return Reply{Text: "Maksud kamu yang mana?", Keyboard: pickItemKeyboard(matches, day)}, nil
 }
 
-func (b *Bot) buy(ctx context.Context, updateID, chatID int64, cmd restock.Command) (Reply, error) {
+// at mengubah tanggal hasil SplitDate menjadi waktu catatan. Catatan
+// bertanggal mundur memakai jam yang sama dengan sekarang, seperti Dompetku.
+func (b *Bot) at(day time.Time) time.Time {
 	now := b.now()
-	res, err := b.Store.Buy(ctx, chatID, updateID, cmd.Name, cmd.Price, now)
+	if day.IsZero() {
+		return now
+	}
+	return day.Add(now.Sub(startOfDay(now)))
+}
+
+// backdated menambahkan baris tanggal kalau catatan bukan untuk hari ini.
+func (b *Bot) backdated(at time.Time) string {
+	if startOfDay(at).Equal(startOfDay(b.now())) {
+		return ""
+	}
+	return "\n📅 Dicatat untuk tanggal " + shortDate(at)
+}
+
+func (b *Bot) buy(ctx context.Context, updateID, chatID int64, cmd restock.Command, at time.Time) (Reply, error) {
+	res, err := b.Store.Buy(ctx, chatID, updateID, cmd.Name, cmd.Price, at)
 	if err != nil {
 		return Reply{}, err
 	}
@@ -167,7 +190,7 @@ func (b *Bot) buy(ctx context.Context, updateID, chatID int64, cmd restock.Comma
 		return Reply{}, err
 	}
 
-	s := formatBought(it, cmd.Price, res.Spare)
+	s := formatBought(it, cmd.Price, res.Spare) + b.backdated(at)
 	if res.NewItem {
 		return Reply{Text: s + "\n\nIni pertama kali kamu catat. Biasanya habis berapa lama?", Keyboard: guessKeyboard(it.ID)}, nil
 	}
@@ -175,8 +198,14 @@ func (b *Bot) buy(ctx context.Context, updateID, chatID int64, cmd restock.Comma
 }
 
 // finish dipakai oleh pesan "habis ..." maupun tombol.
-func (b *Bot) finish(ctx context.Context, updateID, chatID int64, it restock.Item) (string, error) {
-	res, err := b.Store.Finish(ctx, chatID, updateID, it.ID, b.now())
+func (b *Bot) finish(ctx context.Context, updateID, chatID int64, it restock.Item, at time.Time) (string, error) {
+	// Habis sebelum mulai dipakai pasti salah ketik, dan kalau dibiarkan
+	// siklusnya tercatat 1 hari lalu merusak perkiraan.
+	if it.Active != nil && startOfDay(at).Before(startOfDay(it.Active.OpenedAt)) {
+		return fmt.Sprintf("%s baru mulai dipakai tanggal %s, jadi nggak mungkin habis tanggal %s. Cek lagi tanggalnya ya.",
+			bold(it.Name), shortDate(it.Active.OpenedAt), shortDate(at)), nil
+	}
+	res, err := b.Store.Finish(ctx, chatID, updateID, it.ID, at)
 	if err != nil {
 		return "", err
 	}
@@ -189,7 +218,7 @@ func (b *Bot) finish(ctx context.Context, updateID, chatID int64, it restock.Ite
 	if err != nil {
 		return "", err
 	}
-	return formatFinished(after, res), nil
+	return formatFinished(after, res, b.backdated(at)), nil
 }
 
 func (b *Bot) undo(ctx context.Context, chatID int64) (Reply, error) {

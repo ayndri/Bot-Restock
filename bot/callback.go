@@ -8,6 +8,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ayndri/restok/restock"
 	"github.com/ayndri/restok/telegram"
@@ -16,7 +17,8 @@ import (
 // Data tombol (Telegram membatasi 64 byte):
 //
 //	g:<item>:<hari>  tebakan awal lama pemakaian
-//	f:<item>         pilih barang saat "habis ..." cocok ke beberapa barang
+//	f:<item>[:<tgl>] pilih barang saat "habis ..." cocok ke beberapa barang;
+//	                 tgl (YYYYMMDD) ada kalau pesannya bertanggal mundur
 //	rb:<unit>        pengingat → udah beli
 //	rm:<unit>        pengingat → masih ada (tunda)
 //	rh:<unit>        pengingat → udah habis
@@ -54,15 +56,22 @@ func guessKeyboard(itemID int64) *telegram.InlineKeyboardMarkup {
 // maxPick membatasi tombol pilihan supaya pesannya tidak memanjang.
 const maxPick = 6
 
-func pickItemKeyboard(items []restock.Item) *telegram.InlineKeyboardMarkup {
+// pickDateLayout adalah format tanggal di tombol "f:<item>:<tanggal>".
+const pickDateLayout = "20060102"
+
+// pickItemKeyboard ikut membawa tanggal dari "kemarin habis sabun", supaya
+// barang yang dipilih tetap dicatat habis di tanggal itu. day nol = hari ini.
+func pickItemKeyboard(items []restock.Item, day time.Time) *telegram.InlineKeyboardMarkup {
 	var rows [][]telegram.InlineKeyboardButton
 	for i, it := range items {
 		if i == maxPick {
 			break
 		}
-		rows = append(rows, []telegram.InlineKeyboardButton{
-			button(restock.Display(it.Name), fmt.Sprintf("f:%d", it.ID)),
-		})
+		data := fmt.Sprintf("f:%d", it.ID)
+		if !day.IsZero() {
+			data += ":" + day.Format(pickDateLayout)
+		}
+		rows = append(rows, []telegram.InlineKeyboardButton{button(restock.Display(it.Name), data)})
 	}
 	return &telegram.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
@@ -133,7 +142,13 @@ func (b *Bot) callback(ctx context.Context, updateID, chatID, messageID int64, d
 		if !ok {
 			return "", edit("<i>Barang ini udah nggak ada di catatan.</i>")
 		}
-		s, err := b.finish(ctx, updateID, chatID, it)
+		var day time.Time
+		if arg != "" {
+			if day, err = time.ParseInLocation(pickDateLayout, arg, restock.WIB); err != nil {
+				return "", nil
+			}
+		}
+		s, err := b.finish(ctx, updateID, chatID, it, b.at(day))
 		if err != nil {
 			return "", err
 		}
@@ -176,7 +191,7 @@ func (b *Bot) reminderAnswer(ctx context.Context, updateID, chatID, unitID int64
 		return "", edit(fmt.Sprintf("⏳ Oke, %s masih ada. Aku tanya lagi %d hari lagi.", name, snoozeDays))
 
 	default: // "rh"
-		s, err := b.finish(ctx, updateID, chatID, it)
+		s, err := b.finish(ctx, updateID, chatID, it, b.now())
 		if err != nil {
 			return "", err
 		}

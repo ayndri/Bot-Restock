@@ -21,6 +21,11 @@ Aku nyatet barang pribadimu, belajar seberapa cepat kamu ngabisinnya, terus ngin
 <b>Waktu habis</b>
 <code>habis sunscreen</code>
 
+<b>Lupa nyatet?</b> Tambahin tanggalnya di depan atau di belakang
+<code>kemarin beli sunscreen 89rb</code>
+<code>habis serum senin</code>
+<code>5/10 beli shampo</code> (tanggal/bulan)
+
 Makin sering kamu catat, makin pas perkiraannya. Kalau beli lagi padahal yang lama belum habis, yang baru disimpan sebagai cadangan.
 
 <b>Perintah</b>
@@ -88,9 +93,10 @@ func formatGuessSet(it restock.Item, days int) string {
 	return s + "\nSetelah habis beneran, perkiraannya aku sesuaikan sendiri."
 }
 
-func formatFinished(it restock.Item, res restock.FinishResult) string {
+// dateLine kosong untuk catatan hari ini, atau "\n📅 Dicatat untuk tanggal ...".
+func formatFinished(it restock.Item, res restock.FinishResult, dateLine string) string {
 	var s strings.Builder
-	fmt.Fprintf(&s, "✅ %s habis setelah <b>%d hari</b>.", bold(it.Name), res.Days)
+	fmt.Fprintf(&s, "✅ %s habis setelah <b>%d hari</b>.%s", bold(it.Name), res.Days, dateLine)
 	if len(it.Cycles) >= 2 {
 		if days, ok := it.Cycle(); ok {
 			fmt.Fprintf(&s, "\nPerkiraan pemakaianmu sekarang ±%d hari.", days)
