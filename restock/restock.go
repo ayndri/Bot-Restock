@@ -30,6 +30,16 @@ type Unit struct {
 	// RemindedAt tidak nol berarti pengingat untuk unit ini sudah dikirim.
 	RemindedAt  time.Time
 	SnoozeUntil time.Time
+	// ExpiresOn nol berarti tanggal kadaluwarsa tidak dicatat.
+	ExpiresOn time.Time
+	// ExpiryRemindedAt tidak nol berarti pengingat kadaluwarsa sudah dikirim.
+	ExpiryRemindedAt time.Time
+}
+
+// NeedsExpiryReminder menentukan apakah pengingat kadaluwarsa dikirim hari ini.
+func (u Unit) NeedsExpiryReminder(today time.Time) bool {
+	return !u.ExpiresOn.IsZero() && u.ExpiryRemindedAt.IsZero() &&
+		!today.Before(u.ExpiresOn.AddDate(0, 0, -ExpiryRemindBefore))
 }
 
 // Item adalah satu jenis barang beserta keadaannya saat ini.
@@ -41,6 +51,8 @@ type Item struct {
 	// Active adalah unit yang sedang dipakai; nil kalau tidak ada.
 	Active *Unit
 	Spares int
+	// SpareUnits berisi cadangan, urut dari yang akan dibuka duluan.
+	SpareUnits []Unit
 	// Cycles berisi lama pemakaian (hari) unit-unit yang sudah habis,
 	// urut dari yang paling lama habisnya.
 	Cycles []int
@@ -87,6 +99,7 @@ func (it Item) NeedsReminder(today time.Time) bool {
 // BuyResult menjelaskan apa yang terjadi saat satu unit dibeli.
 type BuyResult struct {
 	ItemID  int64
+	UnitID  int64
 	NewItem bool // barang ini baru pertama kali dicatat
 	Spare   bool // disimpan sebagai cadangan karena masih ada yang dipakai
 }

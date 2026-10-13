@@ -45,14 +45,14 @@ func TestStoreFlow(t *testing.T) {
 		t.Fatalf("migrate kedua: %v", err)
 	}
 
-	res, err := st.Buy(ctx, chat, 1, "serum", 120_000, day(1))
+	res, err := st.Buy(ctx, chat, 1, "serum", 120_000, day(1), time.Time{})
 	if err != nil || !res.NewItem || res.Spare {
 		t.Fatalf("beli pertama: %+v, %v", res, err)
 	}
-	if _, err := st.Buy(ctx, chat, 1, "serum", 120_000, day(1)); !errors.Is(err, restock.ErrDuplicate) {
+	if _, err := st.Buy(ctx, chat, 1, "serum", 120_000, day(1), time.Time{}); !errors.Is(err, restock.ErrDuplicate) {
 		t.Fatalf("update dobel: err = %v, mau ErrDuplicate", err)
 	}
-	res, err = st.Buy(ctx, chat, 2, "serum", 0, day(2))
+	res, err = st.Buy(ctx, chat, 2, "serum", 0, day(2), time.Time{})
 	if err != nil || res.NewItem || !res.Spare {
 		t.Fatalf("beli kedua: %+v, %v", res, err)
 	}
@@ -117,10 +117,50 @@ func TestStoreFlow(t *testing.T) {
 	}
 
 	// Habis tanpa unit yang dipakai.
-	res, _ = st.Buy(ctx, chat, 10, "shampo", 0, day(1))
+	res, _ = st.Buy(ctx, chat, 10, "shampo", 0, day(1), time.Time{})
 	st.Finish(ctx, chat, 11, res.ItemID, day(15))
 	if fin, err := st.Finish(ctx, chat, 12, res.ItemID, day(16)); err != nil || !fin.NothingActive {
 		t.Fatalf("habis dua kali: %+v, %v", fin, err)
+	}
+
+	// Kadaluwarsa: tanggal tidak boleh bergeser karena zona waktu, dan
+	// cadangan yang paling cepat kadaluwarsa dibuka duluan.
+	exp := func(m, d int) time.Time { return time.Date(2027, time.Month(m), d, 0, 0, 0, 0, restock.WIB) }
+	res, _ = st.Buy(ctx, chat, 20, "toner", 0, day(1), exp(8, 31))
+	st.Buy(ctx, chat, 21, "toner", 0, day(1), exp(12, 1))
+	late, _ := st.Buy(ctx, chat, 22, "toner", 0, day(1), time.Time{})
+	early, _ := st.Buy(ctx, chat, 23, "toner", 0, day(1), time.Time{})
+	if ok, err := st.SetExpiry(ctx, chat, early.UnitID, exp(3, 1)); !ok || err != nil {
+		t.Fatalf("SetExpiry: %v, %v", ok, err)
+	}
+	if ok, _ := st.SetExpiry(ctx, chat+1, late.UnitID, exp(1, 1)); ok {
+		t.Fatal("chat lain bisa mengatur kadaluwarsa unit ini")
+	}
+	it, _, _ = st.Item(ctx, chat, res.ItemID)
+	if !it.Active.ExpiresOn.Equal(exp(8, 31)) {
+		t.Fatalf("kadaluwarsa tersimpan %v, mau 31 Agu 2027 WIB", it.Active.ExpiresOn)
+	}
+	if len(it.SpareUnits) != 3 || it.SpareUnits[0].ID != early.UnitID || it.SpareUnits[2].ID != late.UnitID {
+		t.Fatalf("urutan cadangan: %+v", it.SpareUnits)
+	}
+	st.Finish(ctx, chat, 24, res.ItemID, day(10))
+	it, _, _ = st.Item(ctx, chat, res.ItemID)
+	if it.Active.ID != early.UnitID {
+		t.Fatalf("cadangan yang dibuka %d, mau %d", it.Active.ID, early.UnitID)
+	}
+	if err := st.MarkExpiryReminded(ctx, early.UnitID, day(11)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Penantian tanggal kadaluwarsa diambil sekali saja.
+	if err := st.SetPending(ctx, chat, late.UnitID, day(12)); err != nil {
+		t.Fatal(err)
+	}
+	if u, since, ok, err := st.TakePending(ctx, chat); !ok || err != nil || u != late.UnitID || !since.Equal(day(12)) {
+		t.Fatalf("TakePending: %d, %v, %v, %v", u, since, ok, err)
+	}
+	if _, _, ok, _ := st.TakePending(ctx, chat); ok {
+		t.Fatal("penantian bisa diambil dua kali")
 	}
 
 	chats, err := st.Chats(ctx)

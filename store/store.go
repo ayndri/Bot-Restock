@@ -46,9 +46,30 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return err
 }
 
+// dateParam mengirim tanggal sebagai teks "2006-01-02" untuk kolom DATE.
+// time.Time akan dikirim sebagai timestamptz lalu dipotong di zona sesi
+// (UTC), sehingga tengah malam WIB mundur sehari.
+func dateParam(t time.Time) *string {
+	if t.IsZero() {
+		return nil
+	}
+	s := t.In(restock.WIB).Format(time.DateOnly)
+	return &s
+}
+
+// wibDate mengubah hasil scan kolom DATE (tengah malam UTC) jadi tengah malam WIB.
+func wibDate(t *time.Time) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, restock.WIB)
+}
+
 // Buy mencatat satu unit baru. Kalau barang itu sedang tidak dipakai, unit
 // langsung dianggap mulai dipakai; kalau masih ada, unit jadi cadangan.
-func (s *Store) Buy(ctx context.Context, chatID, updateID int64, name string, price int64, at time.Time) (restock.BuyResult, error) {
+// expires nol berarti tanggal kadaluwarsa tidak dicatat.
+func (s *Store) Buy(ctx context.Context, chatID, updateID int64, name string, price int64, at, expires time.Time) (restock.BuyResult, error) {
 	var res restock.BuyResult
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
@@ -77,18 +98,18 @@ func (s *Store) Buy(ctx context.Context, chatID, updateID int64, name string, pr
 			opened = &at
 		}
 
-		var unitID int64
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO units (item_id, price, bought_at, opened_at) VALUES ($1, $2, $3, $4)
-			RETURNING id`, res.ItemID, price, at, opened).Scan(&unitID); err != nil {
+			INSERT INTO units (item_id, price, bought_at, opened_at, expires_on) VALUES ($1, $2, $3, $4, $5::date)
+			RETURNING id`, res.ItemID, price, at, opened, dateParam(expires)).Scan(&res.UnitID); err != nil {
 			return err
 		}
-		return logAction(ctx, tx, chatID, updateID, "buy", unitID, 0)
+		return logAction(ctx, tx, chatID, updateID, "buy", res.UnitID, 0)
 	})
 	return res, err
 }
 
-// Finish menutup unit yang sedang dipakai, lalu membuka cadangan tertua kalau ada.
+// Finish menutup unit yang sedang dipakai, lalu membuka cadangan yang paling
+// cepat kadaluwarsa. Cadangan tanpa tanggal kadaluwarsa dibuka dari yang tertua.
 func (s *Store) Finish(ctx context.Context, chatID, updateID, itemID int64, at time.Time) (restock.FinishResult, error) {
 	var res restock.FinishResult
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -114,7 +135,7 @@ func (s *Store) Finish(ctx context.Context, chatID, updateID, itemID int64, at t
 		err = tx.QueryRow(ctx, `
 			UPDATE units SET opened_at = $2 WHERE id = (
 				SELECT id FROM units WHERE item_id = $1 AND opened_at IS NULL
-				ORDER BY bought_at, id LIMIT 1
+				ORDER BY expires_on NULLS LAST, bought_at, id LIMIT 1
 			)
 			RETURNING id`, itemID, at).Scan(&spareID)
 		switch {
@@ -271,26 +292,34 @@ func (s *Store) loadItems(ctx context.Context, chatID, itemID int64) ([]restock.
 		byID[items[i].ID] = &items[i]
 	}
 
-	// Urut berdasarkan waktu habis supaya Cycles ikut urut kronologis.
+	// Urut berdasarkan waktu habis supaya Cycles ikut urut kronologis, lalu
+	// cadangan sesuai urutan dibukanya (sama dengan Finish).
 	rows, err = s.pool.Query(ctx, `
-		SELECT u.id, u.item_id, u.price, u.bought_at, u.opened_at, u.finished_at, u.reminded_at, u.snooze_until
+		SELECT u.id, u.item_id, u.price, u.bought_at, u.opened_at, u.finished_at, u.reminded_at, u.snooze_until,
+		       u.expires_on, u.expiry_reminded_at
 		FROM units u JOIN items i ON i.id = u.item_id
 		WHERE i.chat_id = $1 AND ($2 = 0 OR i.id = $2)
-		ORDER BY u.finished_at NULLS LAST, u.id`, chatID, itemID)
+		ORDER BY u.finished_at NULLS LAST, u.expires_on NULLS LAST, u.bought_at, u.id`, chatID, itemID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var u restock.Unit
-		var opened, finished, reminded, snooze *time.Time
-		if err := rows.Scan(&u.ID, &u.ItemID, &u.Price, &u.BoughtAt, &opened, &finished, &reminded, &snooze); err != nil {
+		var opened, finished, reminded, snooze, expires, expReminded *time.Time
+		if err := rows.Scan(&u.ID, &u.ItemID, &u.Price, &u.BoughtAt, &opened, &finished, &reminded, &snooze,
+			&expires, &expReminded); err != nil {
 			return nil, err
+		}
+		u.ExpiresOn = wibDate(expires)
+		if expReminded != nil {
+			u.ExpiryRemindedAt = *expReminded
 		}
 		it := byID[u.ItemID]
 		switch {
 		case opened == nil:
 			it.Spares++
+			it.SpareUnits = append(it.SpareUnits, u)
 		case finished != nil:
 			it.Cycles = append(it.Cycles, restock.CycleDays(*opened, *finished))
 		default:
@@ -327,6 +356,42 @@ func (s *Store) Snooze(ctx context.Context, unitID int64, until time.Time) error
 	_, err := s.pool.Exec(ctx, `
 		UPDATE units SET snooze_until = $2, reminded_at = NULL WHERE id = $1`, unitID, until)
 	return err
+}
+
+// SetExpiry mengatur tanggal kadaluwarsa satu unit. ok=false kalau unit tidak
+// ada atau milik chat lain.
+func (s *Store) SetExpiry(ctx context.Context, chatID, unitID int64, day time.Time) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE units u SET expires_on = $3::date, expiry_reminded_at = NULL
+		FROM items i WHERE u.id = $1 AND i.id = u.item_id AND i.chat_id = $2`,
+		unitID, chatID, dateParam(day))
+	return tag.RowsAffected() > 0, err
+}
+
+func (s *Store) MarkExpiryReminded(ctx context.Context, unitID int64, at time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE units SET expiry_reminded_at = $2 WHERE id = $1`, unitID, at)
+	return err
+}
+
+// SetPending mencatat bahwa pesan berikutnya dari chat ini adalah tanggal
+// kadaluwarsa untuk unit tersebut. Unit lain yang sedang ditunggu diganti.
+func (s *Store) SetPending(ctx context.Context, chatID, unitID int64, at time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO pending_expiry (chat_id, unit_id, created_at) VALUES ($1, $2, $3)
+		ON CONFLICT (chat_id) DO UPDATE SET unit_id = EXCLUDED.unit_id, created_at = EXCLUDED.created_at`,
+		chatID, unitID, at)
+	return err
+}
+
+// TakePending mengambil sekaligus menghapus unit yang sedang ditunggu.
+func (s *Store) TakePending(ctx context.Context, chatID int64) (unitID int64, since time.Time, ok bool, err error) {
+	err = s.pool.QueryRow(ctx, `
+		DELETE FROM pending_expiry WHERE chat_id = $1 RETURNING unit_id, created_at`,
+		chatID).Scan(&unitID, &since)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, time.Time{}, false, nil
+	}
+	return unitID, since, err == nil, err
 }
 
 // Chats mengembalikan semua chat yang punya barang.

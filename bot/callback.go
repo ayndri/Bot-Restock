@@ -19,6 +19,7 @@ import (
 //	g:<item>:<hari>  tebakan awal lama pemakaian
 //	f:<item>[:<tgl>] pilih barang saat "habis ..." cocok ke beberapa barang;
 //	                 tgl (YYYYMMDD) ada kalau pesannya bertanggal mundur
+//	e:<unit>         atur tanggal kadaluwarsa; pesan berikutnya dibaca sebagai tanggal
 //	rb:<unit>        pengingat → udah beli
 //	rm:<unit>        pengingat → masih ada (tunda)
 //	rh:<unit>        pengingat → udah habis
@@ -37,7 +38,16 @@ func button(label, data string) telegram.InlineKeyboardButton {
 	return telegram.InlineKeyboardButton{Text: label, CallbackData: data}
 }
 
-func guessKeyboard(itemID int64) *telegram.InlineKeyboardMarkup {
+func expiryButton(unitID int64) []telegram.InlineKeyboardButton {
+	return []telegram.InlineKeyboardButton{button("📅 Atur kadaluwarsa", fmt.Sprintf("e:%d", unitID))}
+}
+
+func expiryKeyboard(unitID int64) *telegram.InlineKeyboardMarkup {
+	return &telegram.InlineKeyboardMarkup{InlineKeyboard: [][]telegram.InlineKeyboardButton{expiryButton(unitID)}}
+}
+
+// guessKeyboard menambahkan tombol kadaluwarsa di bawah kalau unitID tidak 0.
+func guessKeyboard(itemID, unitID int64) *telegram.InlineKeyboardMarkup {
 	var rows [][]telegram.InlineKeyboardButton
 	var row []telegram.InlineKeyboardButton
 	for _, o := range guessOptions {
@@ -49,6 +59,9 @@ func guessKeyboard(itemID int64) *telegram.InlineKeyboardMarkup {
 	}
 	if len(row) > 0 {
 		rows = append(rows, row)
+	}
+	if unitID != 0 {
+		rows = append(rows, expiryButton(unitID))
 	}
 	return &telegram.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
@@ -116,7 +129,10 @@ func (b *Bot) callback(ctx context.Context, updateID, chatID, messageID int64, d
 	if err != nil {
 		return "", nil // data rusak; abaikan
 	}
-	edit := func(s string) error { return b.Sender.EditMessage(ctx, chatID, messageID, s, nil) }
+	editKB := func(s string, kb *telegram.InlineKeyboardMarkup) error {
+		return b.Sender.EditMessage(ctx, chatID, messageID, s, kb)
+	}
+	edit := func(s string) error { return editKB(s, nil) }
 
 	switch action {
 	case "g":
@@ -132,7 +148,27 @@ func (b *Bot) callback(ctx context.Context, updateID, chatID, messageID int64, d
 		if err != nil {
 			return "", err
 		}
-		return "", edit(formatGuessSet(it, days))
+		// Tombol kadaluwarsa tetap ada setelah tebakan dijawab, selama belum diisi.
+		var kb *telegram.InlineKeyboardMarkup
+		if it.Active != nil && it.Active.ExpiresOn.IsZero() {
+			kb = expiryKeyboard(it.Active.ID)
+		}
+		return "", editKB(formatGuessSet(it, days), kb)
+
+	case "e":
+		it, ok, err := b.Store.ItemByUnit(ctx, chatID, id)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "Catatan belinya udah dibatalkan.", nil
+		}
+		if err := b.Store.SetPending(ctx, chatID, id, b.now()); err != nil {
+			return "", err
+		}
+		return "", b.Sender.SendMessage(ctx, chatID, fmt.Sprintf(
+			"📅 Kapan kadaluwarsanya %s? Ketik tanggal di kemasan, misalnya <code>8/2027</code> atau <code>15/8/2027</code>.\nNggak jadi? Abaikan aja.",
+			bold(it.Name)), nil)
 
 	case "f":
 		it, ok, err := b.Store.Item(ctx, chatID, id)
@@ -155,12 +191,14 @@ func (b *Bot) callback(ctx context.Context, updateID, chatID, messageID int64, d
 		return "", edit(s)
 
 	case "rb", "rm", "rh":
-		return b.reminderAnswer(ctx, updateID, chatID, id, action, edit)
+		return b.reminderAnswer(ctx, updateID, chatID, id, action, editKB)
 	}
 	return "", nil
 }
 
-func (b *Bot) reminderAnswer(ctx context.Context, updateID, chatID, unitID int64, action string, edit func(string) error) (string, error) {
+func (b *Bot) reminderAnswer(ctx context.Context, updateID, chatID, unitID int64, action string,
+	editKB func(string, *telegram.InlineKeyboardMarkup) error) (string, error) {
+	edit := func(s string) error { return editKB(s, nil) }
 	it, ok, err := b.Store.ItemByUnit(ctx, chatID, unitID)
 	if err != nil {
 		return "", err
@@ -176,12 +214,13 @@ func (b *Bot) reminderAnswer(ctx context.Context, updateID, chatID, unitID int64
 		if it.Spares > 0 {
 			return "Udah kecatat ada cadangan.", edit(fmt.Sprintf("📦 %s udah punya cadangan, aman.", name))
 		}
-		if _, err := b.Store.Buy(ctx, chatID, updateID, it.Name, 0, b.now()); err != nil {
+		res, err := b.Store.Buy(ctx, chatID, updateID, it.Name, 0, b.now(), time.Time{})
+		if err != nil {
 			return "", err
 		}
-		return "Dicatat 🛒", edit(fmt.Sprintf(
+		return "Dicatat 🛒", editKB(fmt.Sprintf(
 			"📦 Cadangan %s dicatat. Begitu yang lama habis, ketik <code>habis %s</code>.",
-			name, html.EscapeString(it.Name)))
+			name, html.EscapeString(it.Name)), expiryKeyboard(res.UnitID))
 
 	case "rm":
 		until := startOfDay(b.now()).AddDate(0, 0, snoozeDays)

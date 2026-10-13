@@ -129,7 +129,8 @@ Kalau `habis …` cocok ke beberapa barang (`habis sabun`), bot menampilkan tomb
 
 ### 🟡 v1 (bot utuh)
 - [ ] Jumlah unit (`beli 2 …`)
-- [ ] Masa basi: `buka`, `tahan N bulan`, pengingat "mau basi"
+- [x] Tanggal kadaluwarsa per unit (opsional): `exp 8/2027` atau tombol, pengingat 14 hari sebelumnya, cadangan dibuka berdasarkan kadaluwarsa terdekat
+- [ ] Masa basi setelah dibuka: `buka`, `tahan N bulan`, pengingat "mau basi"
 - [ ] Tanya kalau lupa lapor (lewat prediksi + 7 hari)
 - [ ] `/belanja` dan `/riwayat`
 - [ ] Pencocokan nama mirip saat `beli`, dengan tombol konfirmasi

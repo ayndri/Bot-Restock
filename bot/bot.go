@@ -16,7 +16,7 @@ import (
 )
 
 type Store interface {
-	Buy(ctx context.Context, chatID, updateID int64, name string, price int64, at time.Time) (restock.BuyResult, error)
+	Buy(ctx context.Context, chatID, updateID int64, name string, price int64, at, expires time.Time) (restock.BuyResult, error)
 	Finish(ctx context.Context, chatID, updateID, itemID int64, at time.Time) (restock.FinishResult, error)
 	Undo(ctx context.Context, chatID int64) (restock.Undone, bool, error)
 	Items(ctx context.Context, chatID int64) ([]restock.Item, error)
@@ -25,6 +25,10 @@ type Store interface {
 	SetGuess(ctx context.Context, chatID, itemID int64, days int) (bool, error)
 	MarkReminded(ctx context.Context, unitID int64, at time.Time) error
 	Snooze(ctx context.Context, unitID int64, until time.Time) error
+	SetExpiry(ctx context.Context, chatID, unitID int64, day time.Time) (bool, error)
+	MarkExpiryReminded(ctx context.Context, unitID int64, at time.Time) error
+	SetPending(ctx context.Context, chatID, unitID int64, at time.Time) error
+	TakePending(ctx context.Context, chatID int64) (unitID int64, since time.Time, ok bool, err error)
 	Chats(ctx context.Context) ([]int64, error)
 }
 
@@ -99,6 +103,9 @@ func (b *Bot) handleMessage(ctx context.Context, updateID int64, m *telegram.Mes
 
 func (b *Bot) respond(ctx context.Context, updateID, chatID int64, msg string) (Reply, error) {
 	if !strings.HasPrefix(msg, "/") {
+		if r, ok, err := b.answerPending(ctx, chatID, msg); err != nil || ok {
+			return r, err
+		}
 		return b.record(ctx, updateID, chatID, msg)
 	}
 
@@ -123,8 +130,62 @@ func command(word string) string {
 	return strings.ToLower(cmd)
 }
 
+// pendingTTL membatasi berapa lama bot menunggu tanggal kadaluwarsa setelah
+// tombolnya ditekan. Lewat dari itu, pesan dibaca seperti biasa.
+const pendingTTL = 24 * time.Hour
+
+// answerPending membaca pesan sebagai tanggal kadaluwarsa kalau sebelumnya
+// tombol "Atur kadaluwarsa" ditekan. ok=false berarti pesan ini bukan
+// jawabannya dan harus diproses seperti biasa; penantiannya ikut batal.
+func (b *Bot) answerPending(ctx context.Context, chatID int64, msg string) (Reply, bool, error) {
+	unitID, since, ok, err := b.Store.TakePending(ctx, chatID)
+	if err != nil || !ok || b.now().Sub(since) > pendingTTL {
+		return Reply{}, false, err
+	}
+	day, isDate, err := restock.ExpiryOnly(msg, startOfDay(b.now()))
+	if !isDate {
+		return Reply{}, false, nil
+	}
+	if err != nil {
+		// Salah tanggal, bukan batal: tetap ditunggu.
+		if err := b.Store.SetPending(ctx, chatID, unitID, since); err != nil {
+			return Reply{}, true, err
+		}
+		return text("Tanggal itu udah lewat. Coba cek lagi kemasannya, terus ketik tanggalnya ya."), true, nil
+	}
+	r, err := b.setExpiry(ctx, chatID, unitID, day)
+	return r, true, err
+}
+
+func (b *Bot) setExpiry(ctx context.Context, chatID, unitID int64, day time.Time) (Reply, error) {
+	ok, err := b.Store.SetExpiry(ctx, chatID, unitID, day)
+	if err != nil {
+		return Reply{}, err
+	}
+	it, found, err := b.Store.ItemByUnit(ctx, chatID, unitID)
+	if err != nil {
+		return Reply{}, err
+	}
+	if !ok || !found {
+		return text("Catatan belinya udah nggak ada, jadi tanggalnya nggak aku simpan."), nil
+	}
+	return text(formatExpirySet(it, unitID, day)), nil
+}
+
+func expiryError(err error) Reply {
+	if errors.Is(err, restock.ErrExpired) {
+		return text("Tanggal kadaluwarsanya udah lewat. Cek lagi kemasannya ya.")
+	}
+	return text("Tanggal kadaluwarsanya nggak kebaca. Contoh: <code>beli sunscreen 89rb exp 8/2027</code> atau <code>exp 15/8/2027</code>.")
+}
+
 func (b *Bot) record(ctx context.Context, updateID, chatID int64, msg string) (Reply, error) {
-	day, rest, err := restock.SplitDate(msg, startOfDay(b.now()))
+	today := startOfDay(b.now())
+	expires, rest, err := restock.SplitExpiry(msg, today)
+	if err != nil {
+		return expiryError(err), nil
+	}
+	day, rest, err := restock.SplitDate(rest, today)
 	if errors.Is(err, restock.ErrFutureDate) {
 		return text("Tanggalnya belum lewat 🙂 Buat catatan yang kelupaan, tulis tanggal yang udah lewat, misalnya <code>kemarin beli sunscreen</code>."), nil
 	}
@@ -133,6 +194,9 @@ func (b *Bot) record(ctx context.Context, updateID, chatID int64, msg string) (R
 	cmd, err := restock.Parse(rest)
 	switch {
 	case errors.Is(err, restock.ErrUnknown):
+		if _, isDate, _ := restock.ExpiryOnly(msg, today); isDate {
+			return text("Tanggal kadaluwarsa buat barang apa? Tulis sekalian waktu beli, misalnya <code>beli sunscreen exp 8/2027</code>, atau tekan tombol 📅 di catatan belinya."), nil
+		}
 		return text(parseHint), nil
 	case errors.Is(err, restock.ErrNoName):
 		return text("Nama barangnya apa? Contoh: <code>beli sunscreen 89rb</code> atau <code>habis sunscreen</code>."), nil
@@ -143,7 +207,10 @@ func (b *Bot) record(ctx context.Context, updateID, chatID int64, msg string) (R
 	}
 
 	if cmd.Action == restock.Buy {
-		return b.buy(ctx, updateID, chatID, cmd, at)
+		return b.buy(ctx, updateID, chatID, cmd, at, expires)
+	}
+	if !expires.IsZero() {
+		return text("Tanggal kadaluwarsa dicatat waktu beli, misalnya <code>beli sunscreen exp 8/2027</code>."), nil
 	}
 
 	items, err := b.Store.Items(ctx, chatID)
@@ -180,8 +247,8 @@ func (b *Bot) backdated(at time.Time) string {
 	return "\n📅 Dicatat untuk tanggal " + shortDate(at)
 }
 
-func (b *Bot) buy(ctx context.Context, updateID, chatID int64, cmd restock.Command, at time.Time) (Reply, error) {
-	res, err := b.Store.Buy(ctx, chatID, updateID, cmd.Name, cmd.Price, at)
+func (b *Bot) buy(ctx context.Context, updateID, chatID int64, cmd restock.Command, at, expires time.Time) (Reply, error) {
+	res, err := b.Store.Buy(ctx, chatID, updateID, cmd.Name, cmd.Price, at, expires)
 	if err != nil {
 		return Reply{}, err
 	}
@@ -191,10 +258,31 @@ func (b *Bot) buy(ctx context.Context, updateID, chatID int64, cmd restock.Comma
 	}
 
 	s := formatBought(it, cmd.Price, res.Spare) + b.backdated(at)
-	if res.NewItem {
-		return Reply{Text: s + "\n\nIni pertama kali kamu catat. Biasanya habis berapa lama?", Keyboard: guessKeyboard(it.ID)}, nil
+	// Tombol kadaluwarsa cuma tawaran: diabaikan juga nggak apa-apa.
+	askExpiry := expires.IsZero()
+	if !askExpiry {
+		s += "\n📅 Kadaluwarsa " + longDate(expires)
 	}
-	return text(s + "\n\nSalah ketik? /batal"), nil
+	if res.NewItem {
+		s += "\n\nIni pertama kali kamu catat. Biasanya habis berapa lama?"
+		if askExpiry {
+			s += "\nKalau ada tanggal kadaluwarsanya, bisa dicatat juga."
+		}
+		return Reply{Text: s, Keyboard: guessKeyboard(it.ID, unitIf(askExpiry, res.UnitID))}, nil
+	}
+	s += "\n\nSalah ketik? /batal"
+	if askExpiry {
+		return Reply{Text: s + "\nAda tanggal kadaluwarsanya?", Keyboard: expiryKeyboard(res.UnitID)}, nil
+	}
+	return text(s), nil
+}
+
+// unitIf mengembalikan id kalau cond benar, 0 kalau tidak.
+func unitIf(cond bool, id int64) int64 {
+	if cond {
+		return id
+	}
+	return 0
 }
 
 // finish dipakai oleh pesan "habis ..." maupun tombol.

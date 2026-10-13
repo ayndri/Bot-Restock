@@ -26,6 +26,10 @@ Aku nyatet barang pribadimu, belajar seberapa cepat kamu ngabisinnya, terus ngin
 <code>habis serum senin</code>
 <code>5/10 beli shampo</code> (tanggal/bulan)
 
+<b>Kadaluwarsa</b> (boleh nggak diisi)
+<code>beli sunscreen 89rb exp 8/2027</code>
+atau tekan tombol 📅 di bawah catatan beli. Aku ingetin 14 hari sebelumnya.
+
 Makin sering kamu catat, makin pas perkiraannya. Kalau beli lagi padahal yang lama belum habis, yang baru disimpan sebagai cadangan.
 
 <b>Perintah</b>
@@ -46,6 +50,11 @@ var monthNames = [...]string{"Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "A
 func shortDate(t time.Time) string {
 	t = t.In(restock.WIB)
 	return fmt.Sprintf("%d %s", t.Day(), monthNames[t.Month()-1])
+}
+
+// longDate memformat tanggal menjadi "31 Agu 2027".
+func longDate(t time.Time) string {
+	return fmt.Sprintf("%s %d", shortDate(t), t.In(restock.WIB).Year())
 }
 
 // relDay memformat jarak hari: "hari ini", "besok", "6 hari lagi", "lewat 3 hari".
@@ -118,6 +127,38 @@ func formatFinished(it restock.Item, res restock.FinishResult, dateLine string) 
 	return s.String()
 }
 
+func formatExpirySet(it restock.Item, unitID int64, day time.Time) string {
+	s := fmt.Sprintf("📅 Kadaluwarsa %s: <b>%s</b>.\nAku ingetin %d hari sebelumnya.",
+		bold(it.Name), longDate(day), restock.ExpiryRemindBefore)
+	if it.Active != nil && it.Active.ID == unitID {
+		if due, ok := it.DueDate(); ok && day.Before(due) {
+			s += fmt.Sprintf("\n\n⚠️ Ini lebih cepat dari perkiraan habisnya (%s). Kayaknya bakal kadaluwarsa sebelum habis.", shortDate(due))
+		}
+	}
+	return s
+}
+
+// formatExpiryReminder dipakai untuk unit yang sedang dipakai maupun cadangan.
+func formatExpiryReminder(it restock.Item, u restock.Unit, today time.Time) string {
+	var when string
+	switch n := restock.DaysBetween(today, u.ExpiresOn); {
+	case n > 1:
+		when = fmt.Sprintf("kadaluwarsa <b>%d hari lagi</b> (%s)", n, longDate(u.ExpiresOn))
+	case n == 1:
+		when = "kadaluwarsa <b>besok</b>"
+	case n == 0:
+		when = "kadaluwarsa <b>hari ini</b>"
+	default:
+		when = fmt.Sprintf("udah kadaluwarsa sejak <b>%s</b>", longDate(u.ExpiresOn))
+	}
+	if it.Active != nil && it.Active.ID == u.ID {
+		return fmt.Sprintf("⏰ %s %s.\n\nHabisin duluan ya. Kalau udah dibuang, ketik <code>habis %s</code>.",
+			bold(it.Name), when, html.EscapeString(it.Name))
+	}
+	return fmt.Sprintf("⏰ %s (yang cadangan, belum dibuka) %s.\n\nCadangan yang paling cepat kadaluwarsa aku buka duluan waktu yang lama habis.",
+		bold(it.Name), when)
+}
+
 func formatReminder(it restock.Item, today time.Time) string {
 	due, _ := it.DueDate()
 	var when string
@@ -176,6 +217,9 @@ func formatStock(items []restock.Item, today time.Time) string {
 			} else {
 				s.WriteString("habis, belum beli lagi")
 			}
+		}
+		if r.it.Active != nil && !r.it.Active.ExpiresOn.IsZero() {
+			fmt.Fprintf(&s, " · exp %s", longDate(r.it.Active.ExpiresOn))
 		}
 		if r.it.Spares > 0 {
 			fmt.Fprintf(&s, " · 📦 %d cadangan", r.it.Spares)

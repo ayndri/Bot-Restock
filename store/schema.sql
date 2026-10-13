@@ -24,6 +24,11 @@ CREATE TABLE IF NOT EXISTS units (
     snooze_until TIMESTAMPTZ
 );
 
+-- Ditambahkan belakangan; ALTER supaya database lama ikut punya kolomnya.
+-- expires_on NULL = tanggal kadaluwarsa tidak dicatat.
+ALTER TABLE units ADD COLUMN IF NOT EXISTS expires_on DATE;
+ALTER TABLE units ADD COLUMN IF NOT EXISTS expiry_reminded_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS units_item_idx ON units (item_id);
 
 -- Satu barang hanya boleh punya satu unit yang sedang dipakai.
@@ -42,4 +47,12 @@ CREATE TABLE IF NOT EXISTS actions (
     opened_unit_id BIGINT      REFERENCES units (id) ON DELETE SET NULL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (chat_id, update_id)
+);
+
+-- Setelah tombol "Atur kadaluwarsa" ditekan, pesan berikutnya dibaca sebagai
+-- tanggal untuk unit ini. Satu chat hanya menunggu satu unit.
+CREATE TABLE IF NOT EXISTS pending_expiry (
+    chat_id    BIGINT      PRIMARY KEY,
+    unit_id    BIGINT      NOT NULL REFERENCES units (id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

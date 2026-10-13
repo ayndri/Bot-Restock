@@ -28,6 +28,11 @@ bot : 🔔 Sunscreen kemungkinan habis sekitar 5 hari lagi (11 Okt).
   `kemarin beli sunscreen 89rb`, `habis serum senin`, `5/10 beli shampo`.
   Tanggal habis yang lebih awal dari tanggal mulai dipakai ditolak, supaya
   siklusnya tidak rusak.
+- **Kadaluwarsa, kalau mau.** Tulis sekalian waktu beli (`beli sunscreen 89rb exp 8/2027`)
+  atau tekan tombol *📅 Atur kadaluwarsa* di bawah catatan beli, lalu ketik tanggal
+  di kemasan. Paham `15/8/2027`, `8/2027`, `08/27`, `agu 2027`. Bot mengingatkan
+  14 hari sebelumnya, termasuk untuk cadangan, dan cadangan yang paling cepat
+  kadaluwarsa dibuka duluan. Tidak diisi juga tidak apa-apa.
 - **Siklus dipelajari sendiri.** Lama pemakaian tiap unit dicatat. Perkiraan berikutnya
   memakai median dari siklus terbaru. Siklus yang janggal (lebih dari 2× atau kurang
   dari separuh median, biasanya karena lupa lapor) dibuang supaya perkiraan tidak rusak.

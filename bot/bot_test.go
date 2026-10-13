@@ -19,6 +19,12 @@ type fakeStore struct {
 	actions []fakeAction
 	seen    map[int64]bool
 	nextID  int64
+	pending *fakePending
+}
+
+type fakePending struct {
+	unitID int64
+	since  time.Time
 }
 
 type fakeUnit struct {
@@ -27,6 +33,8 @@ type fakeUnit struct {
 	bought, opened   time.Time
 	finished         time.Time
 	reminded, snooze time.Time
+	expires          time.Time
+	expReminded      time.Time
 }
 
 type fakeAction struct {
@@ -53,7 +61,7 @@ func (f *fakeStore) active(itemID int64) int {
 	})
 }
 
-func (f *fakeStore) Buy(_ context.Context, _, updateID int64, name string, price int64, at time.Time) (restock.BuyResult, error) {
+func (f *fakeStore) Buy(_ context.Context, _, updateID int64, name string, price int64, at, expires time.Time) (restock.BuyResult, error) {
 	if err := f.once(updateID); err != nil {
 		return restock.BuyResult{}, err
 	}
@@ -64,7 +72,8 @@ func (f *fakeStore) Buy(_ context.Context, _, updateID int64, name string, price
 		i, res.NewItem = len(f.items)-1, true
 	}
 	res.ItemID = f.items[i].ID
-	u := fakeUnit{id: f.id(), itemID: res.ItemID, price: price, bought: at}
+	u := fakeUnit{id: f.id(), itemID: res.ItemID, price: price, bought: at, expires: expires}
+	res.UnitID = u.id
 	if f.active(res.ItemID) >= 0 {
 		res.Spare = true
 	} else {
@@ -86,15 +95,34 @@ func (f *fakeStore) Finish(_ context.Context, _, updateID, itemID int64, at time
 	f.units[a].finished = at
 	res := restock.FinishResult{Days: restock.CycleDays(f.units[a].opened, at)}
 	act := fakeAction{kind: restock.Finish, unitID: f.units[a].id}
-	for i := range f.units {
-		if f.units[i].itemID == itemID && f.units[i].opened.IsZero() {
-			f.units[i].opened = at
-			res.OpenedSpare, act.opened = true, f.units[i].id
-			break
-		}
+	if spares := f.spares(itemID); len(spares) > 0 {
+		i := f.unit(spares[0].id)
+		f.units[i].opened = at
+		res.OpenedSpare, act.opened = true, f.units[i].id
 	}
 	f.actions = append(f.actions, act)
 	return res, nil
+}
+
+// spares mengembalikan cadangan sesuai urutan dibuka: yang paling cepat
+// kadaluwarsa dulu, yang tanpa tanggal paling akhir.
+func (f *fakeStore) spares(itemID int64) []fakeUnit {
+	var out []fakeUnit
+	for _, u := range f.units {
+		if u.itemID == itemID && u.opened.IsZero() {
+			out = append(out, u)
+		}
+	}
+	slices.SortStableFunc(out, func(a, b fakeUnit) int {
+		switch {
+		case a.expires.IsZero() == b.expires.IsZero():
+			return a.expires.Compare(b.expires)
+		case a.expires.IsZero():
+			return 1
+		}
+		return -1
+	})
+	return out
 }
 
 func (f *fakeStore) unit(id int64) int {
@@ -128,15 +156,21 @@ func (f *fakeStore) Items(_ context.Context, _ int64) ([]restock.Item, error) {
 			if u.itemID != it.ID {
 				continue
 			}
+			unit := restock.Unit{ID: u.id, ItemID: u.itemID, Price: u.price, BoughtAt: u.bought,
+				OpenedAt: u.opened, RemindedAt: u.reminded, SnoozeUntil: u.snooze,
+				ExpiresOn: u.expires, ExpiryRemindedAt: u.expReminded}
 			switch {
 			case u.opened.IsZero():
 				it.Spares++
 			case !u.finished.IsZero():
 				it.Cycles = append(it.Cycles, restock.CycleDays(u.opened, u.finished))
 			default:
-				it.Active = &restock.Unit{ID: u.id, ItemID: u.itemID, Price: u.price, BoughtAt: u.bought,
-					OpenedAt: u.opened, RemindedAt: u.reminded, SnoozeUntil: u.snooze}
+				it.Active = &unit
 			}
+		}
+		for _, u := range f.spares(it.ID) {
+			it.SpareUnits = append(it.SpareUnits, restock.Unit{ID: u.id, ItemID: u.itemID, BoughtAt: u.bought,
+				ExpiresOn: u.expires, ExpiryRemindedAt: u.expReminded})
 		}
 		out = append(out, it)
 	}
@@ -180,6 +214,34 @@ func (f *fakeStore) Snooze(_ context.Context, unitID int64, until time.Time) err
 	i := f.unit(unitID)
 	f.units[i].snooze, f.units[i].reminded = until, time.Time{}
 	return nil
+}
+
+func (f *fakeStore) SetExpiry(_ context.Context, _, unitID int64, day time.Time) (bool, error) {
+	i := f.unit(unitID)
+	if i < 0 {
+		return false, nil
+	}
+	f.units[i].expires, f.units[i].expReminded = day, time.Time{}
+	return true, nil
+}
+
+func (f *fakeStore) MarkExpiryReminded(_ context.Context, unitID int64, at time.Time) error {
+	f.units[f.unit(unitID)].expReminded = at
+	return nil
+}
+
+func (f *fakeStore) SetPending(_ context.Context, _, unitID int64, at time.Time) error {
+	f.pending = &fakePending{unitID, at}
+	return nil
+}
+
+func (f *fakeStore) TakePending(context.Context, int64) (int64, time.Time, bool, error) {
+	p := f.pending
+	f.pending = nil
+	if p == nil || f.unit(p.unitID) < 0 {
+		return 0, time.Time{}, false, nil
+	}
+	return p.unitID, p.since, true, nil
 }
 
 func (f *fakeStore) Chats(context.Context) ([]int64, error) {
@@ -417,6 +479,121 @@ func TestFinishAmbiguousKeepsDate(t *testing.T) {
 		t.Fatalf("tombol pilihan = %v", got)
 	}
 	mustContain(t, h.press("f:3:20260905"), "<b>Sabun mandi</b> habis setelah <b>6 hari</b>", "tanggal 5 Sep")
+}
+
+// tap menekan tombol yang membalas dengan pesan baru, bukan mengedit.
+func (h *harness) tap(data string) string {
+	h.t.Helper()
+	h.update++
+	msgs := len(h.sender.msgs)
+	err := h.bot.HandleUpdate(context.Background(), telegram.Update{
+		UpdateID: h.update,
+		CallbackQuery: &telegram.CallbackQuery{ID: "q", Data: data,
+			Message: &telegram.Message{MessageID: 1, Chat: telegram.Chat{ID: chat}}},
+	})
+	if err != nil || len(h.sender.msgs) == msgs {
+		h.t.Fatalf("tombol %q tidak mengirim pesan (err %v)", data, err)
+	}
+	return h.sender.msgs[len(h.sender.msgs)-1].text
+}
+
+func TestExpiryInline(t *testing.T) {
+	h := newHarness(t)
+	r := h.say("beli sunscreen 89rb exp 8/2027")
+	mustContain(t, r.text, "<b>Sunscreen</b> dicatat", "Rp89.000", "Kadaluwarsa 31 Agu 2027")
+	if slices.Contains(buttons(r.kb), "e:2") {
+		t.Error("tombol kadaluwarsa muncul padahal tanggalnya sudah diisi")
+	}
+	want := time.Date(2027, 8, 31, 0, 0, 0, 0, restock.WIB)
+	if got := h.store.units[0].expires; !got.Equal(want) {
+		t.Errorf("kadaluwarsa %v, mau %v", got, want)
+	}
+
+	mustContain(t, h.say("kemarin beli toner ed 15/8/27").text, "Kadaluwarsa 15 Agu 2027", "tanggal 31 Agu")
+	mustContain(t, h.say("beli serum exp 1/2026").text, "udah lewat")
+	mustContain(t, h.say("beli serum exp besok").text, "nggak kebaca")
+	mustContain(t, h.say("habis sunscreen exp 8/2027").text, "dicatat waktu beli")
+}
+
+func TestExpiryButton(t *testing.T) {
+	h := newHarness(t)
+	r := h.say("beli serum")
+	if got := buttons(r.kb); !slices.Contains(got, "g:1:30") || !slices.Contains(got, "e:2") {
+		t.Fatalf("tombol pembelian pertama = %v", got)
+	}
+	// Setelah tebakan dijawab, tombol kadaluwarsa tetap ada.
+	h.press("g:1:30")
+	if got := buttons(h.sender.edits[len(h.sender.edits)-1].kb); !slices.Equal(got, []string{"e:2"}) {
+		t.Fatalf("tombol setelah tebakan = %v", got)
+	}
+
+	mustContain(t, h.tap("e:2"), "Kapan kadaluwarsanya <b>Serum</b>")
+	mustContain(t, h.say("1/2026").text, "udah lewat") // salah tanggal: tetap ditunggu
+	r = h.say("15/9")
+	mustContain(t, r.text, "Kadaluwarsa <b>Serum</b>: <b>15 Sep 2026</b>", "lebih cepat dari perkiraan habisnya (1 Okt)")
+
+	// Pembelian berikutnya menawarkan tombol saja, tanpa tebakan.
+	r = h.say("beli serum")
+	if got := buttons(r.kb); !slices.Equal(got, []string{"e:3"}) {
+		t.Fatalf("tombol pembelian kedua = %v", got)
+	}
+}
+
+func TestExpiryPendingCancelled(t *testing.T) {
+	h := newHarness(t)
+	h.say("beli serum")
+	h.tap("e:2")
+	// Pesan biasa membatalkan penantian dan diproses seperti biasa.
+	mustContain(t, h.say("beli sabun").text, "<b>Sabun</b> dicatat")
+	mustContain(t, h.say("8/2027").text, "buat barang apa")
+	if !h.store.units[0].expires.IsZero() {
+		t.Error("tanggal tetap tersimpan padahal penantian sudah batal")
+	}
+
+	// Penantian kedaluwarsa setelah sehari.
+	h.tap("e:2")
+	h.days(2)
+	mustContain(t, h.say("8/2027").text, "buat barang apa")
+}
+
+func TestSpareWithEarliestExpiryOpensFirst(t *testing.T) {
+	h := newHarness(t)
+	h.say("beli sabun")
+	h.say("beli sabun exp 12/2026")
+	h.say("beli sabun exp 10/2026")
+	h.say("beli sabun") // tanpa tanggal, paling akhir
+	h.days(20)
+	h.say("habis sabun")
+	it, _, _ := h.store.Item(context.Background(), chat, 1)
+	want := time.Date(2026, 10, 31, 0, 0, 0, 0, restock.WIB)
+	if it.Active == nil || !it.Active.ExpiresOn.Equal(want) {
+		t.Fatalf("cadangan yang dibuka: %+v, mau yang kadaluwarsa 31 Okt", it.Active)
+	}
+	mustContain(t, h.say("/stok").text, "exp 31 Okt 2026", "2 cadangan")
+}
+
+func TestDailyExpiryReminder(t *testing.T) {
+	h := newHarness(t)                // 1 Sep
+	h.say("beli serum exp 20/9/2026") // diingatkan mulai 6 Sep
+	h.say("beli serum exp 10/9/2026") // cadangan, langsung masuk 14 hari
+	if n, err := h.bot.RunDaily(context.Background()); n != 1 || err != nil {
+		t.Fatalf("1 Sep: terkirim %d (err %v), mau 1", n, err)
+	}
+	mustContain(t, h.sender.msgs[len(h.sender.msgs)-1].text, "yang cadangan", "9 hari lagi", "10 Sep 2026")
+
+	h.now = time.Date(2026, 9, 5, 8, 0, 0, 0, restock.WIB)
+	if n, _ := h.bot.RunDaily(context.Background()); n != 0 {
+		t.Fatalf("5 Sep: terkirim %d, mau 0", n)
+	}
+	h.days(1)
+	if n, _ := h.bot.RunDaily(context.Background()); n != 1 {
+		t.Fatalf("6 Sep: terkirim %d, mau 1", n)
+	}
+	mustContain(t, h.sender.msgs[len(h.sender.msgs)-1].text, "<b>Serum</b> kadaluwarsa <b>14 hari lagi</b>", "habis serum")
+	h.days(1)
+	if n, _ := h.bot.RunDaily(context.Background()); n != 0 {
+		t.Errorf("pengingat kadaluwarsa dikirim ulang %d kali", n)
+	}
 }
 
 func TestFinishUnknownItem(t *testing.T) {
